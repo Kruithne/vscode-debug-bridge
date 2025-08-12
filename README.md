@@ -1,6 +1,6 @@
 <p align="center"><img src="res/logo.png"/></p>
 
-# vscode-debug-bridge &middot; [![license badge](https://img.shields.io/github/license/Kruithne/devkit?color=yellow)](LICENSE) ![typescript](https://img.shields.io/badge/vscode-blue) ![bun](https://img.shields.io/badge/bun-FBF0DF)
+# vscode-debug-bridge &middot; [![license badge](https://img.shields.io/github/license/Kruithne/devkit?color=yellow)](LICENSE) ![typescript](https://img.shields.io/badge/vscode-1.75.0+-blue) ![node](https://img.shields.io/badge/node.js-339933) ![bun](https://img.shields.io/badge/bun-FBF0DF)
 
 `vscode-debug-bridge` or `vdb` is a command-line tool that provides direct interaction with live debugging sessions in VSCode.
 
@@ -8,7 +8,11 @@
 
 ```bash
 git clone https://github.com/Kruithne/vscode-debug-bridge.git
+
+# link using your preferred js runtime
+npm link
 bun link
+# .. etc
 
 # unix
 ./install-extension.sh
