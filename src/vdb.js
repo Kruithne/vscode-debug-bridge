@@ -237,7 +237,7 @@ function create_vscode_debug_bridge(port = 3579) {
 				throw new Error('Call stack access requires VSCode Debug Bridge extension');
 			
 			const result = await bridge.extension_client.get_call_stack();
-			return result.callStack;
+			return result.call_stack;
 		}
 	};
 	
@@ -366,12 +366,18 @@ async function main() {
 			case 'stack':
 				try {
 					const call_stack = await vdb.get_call_stack();
-					call_stack.forEach((thread, thread_index) => {
-						thread.frames.forEach((frame, frame_index) => {
-							const location = frame.source ? `${frame.source}:${frame.line}` : 'unknown';
-							console.log(`${thread.threadId}:${frame_index} ${frame.name} ${location}`);
+					if (call_stack && call_stack.length > 0) {
+						call_stack.forEach((thread) => {
+							if (thread.frames && thread.frames.length > 0) {
+								thread.frames.forEach((frame, frame_index) => {
+									const location = frame.source ? `${frame.source}:${frame.line}` : 'unknown';
+									console.log(`${thread.thread_id}:${frame_index} ${frame.name} ${location}`);
+								});
+							}
 						});
-					});
+					} else {
+						console.log('No call stack information available');
+					}
 				}
 				catch (error) {
 					console.error(error.message);
