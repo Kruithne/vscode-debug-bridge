@@ -3,6 +3,34 @@
 
 function create_vscode_extension_client(port = 3579) {
 	const base_url = `http://localhost:${port}`;
+	
+	async function get_endpoint(endpoint, payload = null) {
+		const url = `${base_url}/${endpoint}`;
+		const options = payload ? {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload)
+		} : {};
+		
+		const response = await fetch(url, options);
+		
+		if (!response.ok) {
+			let error;
+			try {
+				error = await response.json();
+			} catch {
+				throw new Error(`HTTP ${response.status}`);
+			}
+			throw new Error(error.error || `Failed to ${endpoint}`);
+		}
+		
+		try {
+			return await response.json();
+		} catch {
+			throw new Error('Invalid JSON response');
+		}
+	}
+	
 	const client = {
 		base_url,
 		
@@ -17,106 +45,39 @@ function create_vscode_extension_client(port = 3579) {
 		},
 		
 		async get_status() {
-			const response = await fetch(`${client.base_url}/status`);
-			if (!response.ok)
-				throw new Error('Extension not available');
-			return await response.json();
+			return await get_endpoint('status');
 		},
 		
 		async get_variables() {
-			const response = await fetch(`${client.base_url}/variables`);
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to get variables');
-			}
-			return await response.json();
+			return await get_endpoint('variables');
 		},
 		
 		async get_variable(name) {
-			const response = await fetch(`${client.base_url}/variables/${encodeURIComponent(name)}`);
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || `Variable '${name}' not found`);
-			}
-			return await response.json();
+			return await get_endpoint(`variables/${encodeURIComponent(name)}`);
 		},
 		
 		async get_call_stack() {
-			const response = await fetch(`${client.base_url}/callstack`);
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to get call stack');
-			}
-			return await response.json();
+			return await get_endpoint('callstack');
 		},
 		
 		async get_threads() {
-			const response = await fetch(`${client.base_url}/threads`);
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to get threads');
-			}
-			return await response.json();
+			return await get_endpoint('threads');
 		},
 		
 		async evaluate_expression(expression, frame_id = null, context = 'watch') {
-			const response = await fetch(`${client.base_url}/evaluate`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ expression, frameId: frame_id, context })
-			});
-			
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to evaluate expression');
-			}
-			
-			return await response.json();
+			return await get_endpoint('evaluate', { expression, frameId: frame_id, context });
 		},
 		
 		async read_memory(address, count = 64, offset = 0) {
-			const response = await fetch(`${client.base_url}/memory`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ address, count, offset })
-			});
-			
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to read memory');
-			}
-			
-			return await response.json();
+			return await get_endpoint('memory', { address, count, offset });
 		},
 		
 		async set_breakpoints(file, lines) {
-			const response = await fetch(`${client.base_url}/breakpoints`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ file, lines, action: 'set' })
-			});
-			
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to set breakpoints');
-			}
-			
-			return await response.json();
+			return await get_endpoint('breakpoints', { file, lines, action: 'set' });
 		},
 		
 		async clear_breakpoints(file, lines = null) {
-			const response = await fetch(`${client.base_url}/breakpoints`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ file, lines, action: 'clear' })
-			});
-			
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to clear breakpoints');
-			}
-			
-			return await response.json();
+			return await get_endpoint('breakpoints', { file, lines, action: 'clear' });
 		},
 		
 		async continue(thread_id = null) {
@@ -140,81 +101,27 @@ function create_vscode_extension_client(port = 3579) {
 		},
 		
 		async control(action, thread_id = null) {
-			const response = await fetch(`${client.base_url}/control`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ action, threadId: thread_id })
-			});
-			
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || `Failed to ${action}`);
-			}
-			
-			return await response.json();
+			return await get_endpoint('control', { action, threadId: thread_id });
 		},
 		
 		async get_profiles() {
-			const response = await fetch(`${client.base_url}/profiles`);
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to get debug profiles');
-			}
-			return await response.json();
+			return await get_endpoint('profiles');
 		},
 		
 		async start_debugging(profile_name = null) {
-			const response = await fetch(`${client.base_url}/start`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ profile: profile_name })
-			});
-			
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to start debugging');
-			}
-			
-			return await response.json();
+			return await get_endpoint('start', { profile: profile_name });
 		},
 		
 		async get_all_breakpoints() {
-			const response = await fetch(`${client.base_url}/breakpoints`);
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to get breakpoints');
-			}
-			return await response.json();
+			return await get_endpoint('breakpoints');
 		},
 		
 		async add_breakpoints(file, lines) {
-			const response = await fetch(`${client.base_url}/breakpoints`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ file, lines, action: 'set' })
-			});
-			
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to add breakpoints');
-			}
-			
-			return await response.json();
+			return await get_endpoint('breakpoints', { file, lines, action: 'set' });
 		},
 		
 		async remove_breakpoints(file, lines = null) {
-			const response = await fetch(`${client.base_url}/breakpoints`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ file, lines, action: 'clear' })
-			});
-			
-			if (!response.ok) {
-				const error = await response.json();
-				throw new Error(error.error || 'Failed to remove breakpoints');
-			}
-			
-			return await response.json();
+			return await get_endpoint('breakpoints', { file, lines, action: 'clear' });
 		}
 	};
 	
