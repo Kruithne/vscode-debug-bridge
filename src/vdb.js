@@ -72,8 +72,10 @@ function create_vscode_extension_client(port = 3579) {
 			return await get_endpoint('memory', { address, count, offset });
 		},
 		
-		async set_breakpoints(file, lines) {
-			return await get_endpoint('breakpoints', { file, lines, action: 'set' });
+		async set_breakpoints(file, lines, condition = null) {
+			const payload = { file, lines, action: 'set' };
+			if (condition) payload.condition = condition;
+			return await get_endpoint('breakpoints', payload);
 		},
 		
 		async clear_breakpoints(file, lines = null) {
@@ -116,8 +118,10 @@ function create_vscode_extension_client(port = 3579) {
 			return await get_endpoint('breakpoints');
 		},
 		
-		async add_breakpoints(file, lines) {
-			return await get_endpoint('breakpoints', { file, lines, action: 'set' });
+		async add_breakpoints(file, lines, condition = null) {
+			const payload = { file, lines, action: 'set' };
+			if (condition) payload.condition = condition;
+			return await get_endpoint('breakpoints', payload);
 		},
 		
 		async remove_breakpoints(file, lines = null) {
@@ -467,7 +471,7 @@ async function main() {
 				const break_action = args[1];
 				if (!break_action) {
 					console.error('break action required (add, remove, list)');
-					console.log('Usage: vdb break add <file> <line> [line2...]');
+					console.log('Usage: vdb break add <file> <line> [condition]');
 					console.log('       vdb break remove <file> [line] [line2...]');
 					console.log('       vdb break list');
 					return;
@@ -481,7 +485,17 @@ async function main() {
 						} else {
 							result.breakpoints.forEach(bp => {
 								const status = bp.enabled ? 'enabled' : 'disabled';
-								console.log(`${bp.file}:${bp.line} (${status})`);
+								let output = `${bp.file}:${bp.line} (${status})`;
+								
+								if (bp.condition) {
+									output += ` - condition: ${bp.condition}`;
+								} else if (bp.hitCondition) {
+									output += ` - hit count: ${bp.hitCondition}`;
+								} else if (bp.logMessage) {
+									output += ` - log: ${bp.logMessage}`;
+								}
+								
+								console.log(output);
 							});
 						}
 					}
@@ -490,17 +504,42 @@ async function main() {
 					}
 				} else if (break_action === 'add') {
 					const file = args[2];
-					const lines = args.slice(3).map(l => parseInt(l));
+					const remaining_args = args.slice(3);
 					
-					if (!file || lines.length === 0) {
-						console.error('file and line numbers required');
-						console.log('Usage: vdb break add <file> <line> [line2...]');
+					if (!file || remaining_args.length === 0) {
+						console.error('file and line number required');
+						console.log('Usage: vdb break add <file> <line> [condition]');
+						return;
+					}
+					
+					// Parse line numbers and condition
+					const line_args = [];
+					let condition = null;
+					
+					for (const arg of remaining_args) {
+						const parsed = parseInt(arg);
+						if (!isNaN(parsed)) {
+							line_args.push(parsed);
+						} else {
+							// Non-numeric argument is treated as condition (should be last)
+							condition = arg;
+							break;
+						}
+					}
+					
+					if (line_args.length === 0) {
+						console.error('at least one line number required');
+						console.log('Usage: vdb break add <file> <line> [condition]');
 						return;
 					}
 					
 					try {
-						const result = await vdb.extension_client.add_breakpoints(file, lines);
-						console.log(`Added ${lines.length} breakpoint(s) to ${file}`);
+						const result = await vdb.extension_client.add_breakpoints(file, line_args, condition);
+						if (condition) {
+							console.log(`Added ${line_args.length} conditional breakpoint(s) to ${file} with condition: ${condition}`);
+						} else {
+							console.log(`Added ${line_args.length} breakpoint(s) to ${file}`);
+						}
 					}
 					catch (error) {
 						console.error(error.message);
@@ -553,7 +592,7 @@ async function main() {
 				console.log('');
 				console.log('Breakpoint Management:');
 				console.log('break list          List all breakpoints');
-				console.log('break add <file> <line> [line2...]   Add breakpoints');
+				console.log('break add <file> <line> [condition]  Add breakpoint (with optional condition)');
 				console.log('break remove <file> [line] [line2...] Remove breakpoints');
 				console.log('');
 				console.log('Debug Information (requires active session):');

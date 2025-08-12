@@ -61,11 +61,24 @@ C:\path\to\file.c:40 (enabled)
 
 #### vdb break add
 
-Add breakpoints to specific lines:
+Add breakpoints to specific lines. Optionally specify a condition:
 
 ```bash
-> vdb break add C:\path\to\file.c 25 30 35
-Added 3 breakpoint(s) to C:\path\to\file.c
+# Basic breakpoint
+> vdb break add C:\path\to\file.c 25
+Added 1 breakpoint(s) to C:\path\to\file.c
+
+# Conditional breakpoint (expression)
+> vdb break add C:\path\to\file.c 27 "i == 2"
+Added 1 conditional breakpoint(s) to C:\path\to\file.c with condition: i == 2
+
+# Hit count breakpoint
+> vdb break add C:\path\to\file.c 30 ">5"
+Added 1 conditional breakpoint(s) to C:\path\to\file.c with condition: >5
+
+# Log message breakpoint
+> vdb break add C:\path\to\file.c 35 "Loop iteration {i}"
+Added 1 conditional breakpoint(s) to C:\path\to\file.c with condition: Loop iteration {i}
 ```
 
 #### vdb break remove
@@ -220,7 +233,7 @@ status              Check debug and extension status (default)
 
 Breakpoint Management:
 break list          List all breakpoints
-break add <file> <line> [line2...]   Add breakpoints
+break add <file> <line> [condition]  Add breakpoint (with optional condition)
 break remove <file> [line] [line2...] Remove breakpoints
 
 Debug Information (requires active session):

@@ -247,13 +247,37 @@ const handle_threads = async (req, res) => {
 	}
 };
 
-const set_breakpoints = async (file, lines) => {
+const parse_condition = (condition_str) => {
+	if (!condition_str) return {};
+	
+	// Log message: contains {...}
+	if (condition_str.includes('{') && condition_str.includes('}')) {
+		return { logMessage: condition_str };
+	}
+	
+	// Hit condition: starts with comparison operators or %
+	if (/^(>|<|>=|<=|==|!=|%)/.test(condition_str.trim())) {
+		return { hitCondition: condition_str };
+	}
+	
+	// Expression condition: everything else
+	return { condition: condition_str };
+};
+
+const set_breakpoints = async (file, lines, condition = null) => {
 	const uri = vscode.Uri.file(file);
 	const lineNumbers = Array.isArray(lines) ? lines : [lines];
+	const conditionProps = parse_condition(condition);
 	
 	// Create breakpoints using VSCode's breakpoint API
 	const breakpoints = lineNumbers.map(line => 
-		new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(line - 1, 0)))
+		new vscode.SourceBreakpoint(
+			new vscode.Location(uri, new vscode.Position(line - 1, 0)),
+			undefined, // enabled
+			conditionProps.condition,
+			conditionProps.hitCondition,
+			conditionProps.logMessage
+		)
 	);
 	
 	// Add breakpoints to VSCode
@@ -263,9 +287,17 @@ const set_breakpoints = async (file, lines) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (debug_session) {
 		try {
+			const dapBreakpoints = lineNumbers.map(line => {
+				const bp = { line };
+				if (conditionProps.condition) bp.condition = conditionProps.condition;
+				if (conditionProps.hitCondition) bp.hitCondition = conditionProps.hitCondition;
+				if (conditionProps.logMessage) bp.logMessage = conditionProps.logMessage;
+				return bp;
+			});
+			
 			const result = await debug_session.customRequest('setBreakpoints', {
 				source: { path: file },
-				breakpoints: lineNumbers.map(line => ({ line }))
+				breakpoints: dapBreakpoints
 			});
 			return { vscode: breakpoints.length, dap: result };
 		} catch (error) {
@@ -352,7 +384,7 @@ const handle_breakpoints = async (req, res) => {
 		}
 		
 		const body = await parse_request_body(req);
-		const { file, lines, action = 'set' } = body;
+		const { file, lines, action = 'set', condition = null } = body;
 		
 		if (!file) {
 			send_json_response(res, 400, { error: 'File is required' });
@@ -365,7 +397,7 @@ const handle_breakpoints = async (req, res) => {
 				send_json_response(res, 400, { error: 'Lines are required for set action' });
 				return;
 			}
-			result = await set_breakpoints(file, lines);
+			result = await set_breakpoints(file, lines, condition);
 		} else if (action === 'clear') {
 			result = await clear_breakpoints(file, lines);
 		} else {
