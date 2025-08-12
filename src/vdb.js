@@ -64,6 +64,10 @@ function create_vscode_extension_client(port = 3579) {
 			return await get_endpoint('threads');
 		},
 		
+		async get_registers() {
+			return await get_endpoint('registers');
+		},
+		
 		async evaluate_expression(expression, frame_id = null, context = 'watch') {
 			return await get_endpoint('evaluate', { expression, frameId: frame_id, context });
 		},
@@ -168,6 +172,61 @@ function format_hex_dump(buffer, start_address = '0x0') {
 	return result;
 }
 
+function format_registers(registers) {
+	let result = '';
+	
+	for (const [category, data] of Object.entries(registers)) {
+		if (typeof data === 'object' && data !== null && !data.value) {
+			result += `${category}:\n`;
+			result += format_register_category(data);
+			result += '\n';
+		}
+	}
+	
+	return result.trim();
+}
+
+function format_register_category(category_data) {
+	const registers = [];
+	
+	for (const [name, data] of Object.entries(category_data)) {
+		if (typeof data === 'object' && data !== null) {
+			if (data.value !== undefined) {
+				registers.push({ name, value: data.value, type: data.type });
+			} else {
+				for (const [nested_name, nested_data] of Object.entries(data)) {
+					if (typeof nested_data === 'object' && nested_data.value !== undefined)
+						registers.push({ name: nested_name, value: nested_data.value, type: nested_data.type });
+				}
+			}
+		}
+	}
+	
+	if (registers.length === 0)
+		return '';
+	
+	const has_long_values = registers.some(reg => reg.value && reg.value.length > 20);
+	
+	if (has_long_values) {
+		return registers.map(reg => `  ${reg.name}=${reg.value}`).join('\n') + '\n';
+	} else {
+		const registers_per_line = 3;
+		const max_name_length = Math.max(...registers.map(reg => reg.name.length));
+		const lines = [];
+		
+		for (let i = 0; i < registers.length; i += registers_per_line) {
+			const line_registers = registers.slice(i, i + registers_per_line);
+			const formatted_line = line_registers.map(reg => {
+				const padded_name = reg.name.padEnd(max_name_length);
+				return `${padded_name}=${reg.value}`;
+			}).join('  ');
+			lines.push(`  ${formatted_line}`);
+		}
+		
+		return lines.join('\n') + '\n';
+	}
+}
+
 function create_vscode_debug_bridge(port = 3579) {
 	const bridge = {
 		extension_client: create_vscode_extension_client(port),
@@ -238,6 +297,14 @@ function create_vscode_debug_bridge(port = 3579) {
 			
 			const result = await bridge.extension_client.get_call_stack();
 			return result.call_stack;
+		},
+		
+		async get_registers() {
+			if (!bridge.extension_available)
+				throw new Error('Register access requires VSCode Debug Bridge extension');
+			
+			const result = await bridge.extension_client.get_registers();
+			return result.registers;
 		}
 	};
 	
@@ -390,6 +457,21 @@ async function main() {
 					result.threads.forEach(thread => {
 						console.log(`${thread.id} ${thread.name}`);
 					});
+				}
+				catch (error) {
+					console.error(error.message);
+				}
+				break;
+				
+			case 'registers':
+				try {
+					const registers = await vdb.get_registers();
+					if (Object.keys(registers).length === 0) {
+						console.log('No register information available');
+					} else {
+						const formatted = format_registers(registers);
+						console.log(formatted.trim());
+					}
 				}
 				catch (error) {
 					console.error(error.message);
@@ -608,6 +690,7 @@ async function main() {
 				console.log('mem <addr> [sz]     Read memory at address');
 				console.log('stack               Show call stack');
 				console.log('threads             List all threads');
+				console.log('registers           Show CPU registers');
 				console.log('');
 				console.log('Debug Control (requires active session):');
 				console.log('continue            Continue execution');

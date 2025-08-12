@@ -235,11 +235,88 @@ const get_threads = async () => {
 	return threads.threads || [];
 };
 
+const get_registers = async () => {
+	if (!current_session)
+		throw new Error('No active debug session');
+	
+	const debug_session = vscode.debug.activeDebugSession;
+	if (!debug_session)
+		throw new Error('No active debug session found');
+	
+	const threads = await debug_session.customRequest('threads');
+	if (!threads?.threads?.length)
+		throw new Error('No threads found');
+	
+	const thread_id = threads.threads[0].id;
+	const stack_trace = await debug_session.customRequest('stackTrace', { threadId: thread_id });
+	
+	if (!stack_trace.stackFrames?.length)
+		throw new Error('No stack frames found');
+	
+	const frame_id = stack_trace.stackFrames[0].id;
+	const scopes = await debug_session.customRequest('scopes', { frameId: frame_id });
+	
+	const registers = {};
+	
+	if (scopes.scopes) {
+		for (const scope of scopes.scopes) {
+			if (scope.name.toLowerCase().includes('register') && scope.variablesReference > 0) {
+				const scope_vars = await debug_session.customRequest('variables', {
+					variablesReference: scope.variablesReference
+				});
+				
+				if (scope_vars.variables)
+					await process_register_variables(debug_session, scope_vars.variables, registers, scope.name);
+			}
+		}
+	}
+	
+	return registers;
+};
+
+const process_register_variables = async (debug_session, variables, registers, category_name) => {
+	for (const variable of variables) {
+		if (variable.variablesReference > 0) {
+			const nested_vars = await debug_session.customRequest('variables', {
+				variablesReference: variable.variablesReference
+			});
+			
+			if (nested_vars.variables) {
+				if (!registers[variable.name])
+					registers[variable.name] = {};
+
+				await process_register_variables(debug_session, nested_vars.variables, registers[variable.name], variable.name);
+			}
+		} else {
+			if (!registers[category_name])
+				registers[category_name] = {};
+
+			registers[category_name][variable.name] = {
+				value: variable.value,
+				type: variable.type,
+				description: variable.evaluateName || variable.name
+			};
+		}
+	}
+};
+
 const handle_threads = async (req, res) => {
 	try {
 		const threads = await get_threads();
 		send_json_response(res, 200, { 
 			threads,
+			timestamp: new Date().toISOString()
+		});
+	} catch (error) {
+		send_json_response(res, 500, { error: error.message });
+	}
+};
+
+const handle_registers = async (req, res) => {
+	try {
+		const registers = await get_registers();
+		send_json_response(res, 200, { 
+			registers,
 			timestamp: new Date().toISOString()
 		});
 	} catch (error) {
@@ -733,6 +810,8 @@ const handle_request = async (req, res) => {
 			await handle_call_stack(req, res);
 		else if (req.method === 'GET' && url_parts[0] === 'threads')
 			await handle_threads(req, res);
+		else if (req.method === 'GET' && url_parts[0] === 'registers')
+			await handle_registers(req, res);
 		else if (req.method === 'POST' && url_parts[0] === 'evaluate')
 			await handle_evaluate(req, res);
 		else if ((req.method === 'POST' || req.method === 'GET') && url_parts[0] === 'breakpoints')
