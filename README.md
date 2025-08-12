@@ -1,3 +1,5 @@
+<p align="center"><img src="res/logo.png"/></p>
+
 # vscode-debug-bridge &middot; [![license badge](https://img.shields.io/github/license/Kruithne/devkit?color=yellow)](LICENSE) ![typescript](https://img.shields.io/badge/vscode-blue) ![bun](https://img.shields.io/badge/bun-FBF0DF)
 
 `vscode-debug-bridge` or `vdb` is a command-line tool that provides direct interaction with live debugging sessions in VSCode.
