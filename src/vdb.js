@@ -329,6 +329,54 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 			return await send_command('disassemble', { address, count, offset });
 		},
 		
+		async get_data_breakpoint_info(name, variables_reference = null) {
+			return await send_command('dataBreakpointInfo', { name, variablesReference: variables_reference });
+		},
+		
+		async set_data_breakpoints(data_breakpoints) {
+			return await send_command('setDataBreakpoints', { breakpoints: data_breakpoints });
+		},
+		
+		async add_data_breakpoint(name, access_type = 'readWrite', condition = null) {
+			const info = await this.get_data_breakpoint_info(name);
+			if (!info.dataId) {
+				throw new Error(`Cannot create data breakpoint for '${name}': ${info.description}`);
+			}
+			
+			const current_breakpoints = await this.get_all_breakpoints();
+			const data_breakpoints = current_breakpoints.breakpoints
+				.filter(bp => bp.type === 'data')
+				.map(bp => ({
+					dataId: bp.dataId,
+					accessType: bp.accessType,
+					condition: bp.condition
+				}));
+			
+			const new_data_breakpoint = {
+				dataId: info.dataId,
+				accessType: access_type,
+				condition: condition
+			};
+			
+			data_breakpoints.push(new_data_breakpoint);
+			
+			return await this.set_data_breakpoints(data_breakpoints);
+		},
+		
+		async remove_data_breakpoint(name) {
+			const current_breakpoints = await this.get_all_breakpoints();
+			const data_breakpoints = current_breakpoints.breakpoints
+				.filter(bp => bp.type === 'data')
+				.filter(bp => !bp.description.includes(name))
+				.map(bp => ({
+					dataId: bp.dataId,
+					accessType: bp.accessType,
+					condition: bp.condition
+				}));
+			
+			return await this.set_data_breakpoints(data_breakpoints);
+		},
+		
 		async wait_for_event(events, timeout = 60000) {
 			if (typeof events === 'string')
 				events = [events];
@@ -894,9 +942,10 @@ async function main() {
 			case 'break':
 				const break_action = args[1];
 				if (!break_action) {
-					console.error('break action required (add, remove, list)');
+					console.error('break action required (add, remove, list, watch)');
 					console.log('Usage: vdb break add <file> <line> [condition]');
 					console.log('       vdb break remove <file> [line] [line2...]');
+					console.log('       vdb break watch <variable/address> [read|write|access]');
 					console.log('       vdb break list');
 					return;
 				}
@@ -908,18 +957,32 @@ async function main() {
 							console.log('No breakpoints set');
 						} else {
 							result.breakpoints.forEach(bp => {
-								const status = bp.enabled ? 'enabled' : 'disabled';
-								let output = `${bp.file}:${bp.line} (${status})`;
-								
-								if (bp.condition) {
-									output += ` - condition: ${bp.condition}`;
-								} else if (bp.hitCondition) {
-									output += ` - hit count: ${bp.hitCondition}`;
-								} else if (bp.logMessage) {
-									output += ` - log: ${bp.logMessage}`;
+								if (bp.type === 'data') {
+									let output = `${bp.description} (${bp.accessType})`;
+									if (bp.condition)
+										output += ` - condition: ${bp.condition}`;
+
+									if (!bp.verified)
+										output += ` - UNVERIFIED`;
+
+									if (bp.message)
+										output += ` - ${bp.message}`;
+									
+									console.log(output);
+								} else {
+									const status = bp.enabled ? 'enabled' : 'disabled';
+									let output = `${bp.file}:${bp.line} (${status})`;
+									
+									if (bp.condition) {
+										output += ` - condition: ${bp.condition}`;
+									} else if (bp.hitCondition) {
+										output += ` - hit count: ${bp.hitCondition}`;
+									} else if (bp.logMessage) {
+										output += ` - log: ${bp.logMessage}`;
+									}
+									
+									console.log(output);
 								}
-								
-								console.log(output);
 							});
 						}
 					}
@@ -985,6 +1048,32 @@ async function main() {
 						} else {
 							console.log(`Removed all breakpoints from ${file}`);
 						}
+					}
+					catch (error) {
+						console.error(error.message);
+					}
+				} else if (break_action === 'watch') {
+					const target = args[2];
+					const access_type = args[3] || 'access';
+					const condition = args[4] || null;
+					
+					if (!target) {
+						console.error('variable or address required');
+						console.log('Usage: vdb break watch <variable/address> [read|write|access]');
+						return;
+					}
+					
+					const valid_access_types = ['read', 'write', 'access', 'readWrite'];
+					const mapped_access_type = access_type === 'access' ? 'readWrite' : access_type;
+					
+					if (!valid_access_types.includes(mapped_access_type)) {
+						console.error(`Invalid access type: ${access_type}. Must be one of: read, write, access`);
+						return;
+					}
+					
+					try {
+						const result = await vdb.extension_client.add_data_breakpoint(target, mapped_access_type, condition);
+						console.log(`Added data breakpoint for '${target}' (${access_type})`);
 					}
 					catch (error) {
 						console.error(error.message);
@@ -1105,6 +1194,7 @@ async function main() {
 				console.log('break list          List all breakpoints');
 				console.log('break add <file> <line> [condition]  Add breakpoint (with optional condition)');
 				console.log('break remove <file> [line] [line2...] Remove breakpoints');
+				console.log('break watch <var/addr> [read|write|access] Add data breakpoint/watchpoint');
 				console.log('');
 				console.log('Debug Information (requires active session):');
 				console.log('var <name>          Get variable value');

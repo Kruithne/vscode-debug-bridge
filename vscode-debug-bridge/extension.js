@@ -8,12 +8,14 @@ let debug_state = {
 	call_stack: [],
 	threads: [],
 	breakpoints: new Set(),
+	data_breakpoints: new Set(),
 	is_running: false,
 	current_frame: null,
 	execution_state: 'unknown',
 	stop_reason: null,
 	stop_location: null,
-	stopped_at_breakpoint: false
+	stopped_at_breakpoint: false,
+	supports_data_breakpoints: false
 };
 
 const clients = new Set();
@@ -418,7 +420,105 @@ const get_breakpoints = () => {
 		enabled: bp.enabled,
 		condition: bp.condition || null,
 		hitCondition: bp.hitCondition || null,
-		logMessage: bp.logMessage || null
+		logMessage: bp.logMessage || null,
+		type: 'source'
+	}));
+};
+
+const check_data_breakpoint_capabilities = async () => {
+	const debug_session = vscode.debug.activeDebugSession;
+	if (!debug_session)
+		return false;
+	
+	try {
+		const capabilities = debug_session.configuration.capabilities || debug_session.capabilities;
+		
+		if (capabilities && capabilities.supportsDataBreakpoints) {
+			debug_state.supports_data_breakpoints = true;
+			return true;
+		}
+		
+		const result = await debug_session.customRequest('capabilities');
+		debug_state.supports_data_breakpoints = result?.supportsDataBreakpoints || false;
+		return debug_state.supports_data_breakpoints;
+	} catch (error) {
+		debug_state.supports_data_breakpoints = false;
+		return false;
+	}
+};
+
+const get_data_breakpoint_info = async (variable_name = null, variables_reference = null) => {
+	const debug_session = vscode.debug.activeDebugSession;
+	if (!debug_session)
+		throw new Error('No active debug session');
+	
+	if (!debug_state.supports_data_breakpoints)
+		throw new Error('Data breakpoints are not supported by the current debug adapter');
+	
+	try {
+		const result = await debug_session.customRequest('dataBreakpointInfo', {
+			name: variable_name,
+			variablesReference: variables_reference
+		});
+		
+		return {
+			dataId: result.dataId,
+			description: result.description,
+			accessTypes: result.accessTypes || ['read', 'write', 'readWrite'],
+			canPersist: result.canPersist || false
+		};
+	} catch (error) {
+		throw new Error(`Failed to get data breakpoint info: ${error.message}`);
+	}
+};
+
+const set_data_breakpoints = async (data_breakpoints = []) => {
+	const debug_session = vscode.debug.activeDebugSession;
+	if (!debug_session)
+		throw new Error('No active debug session');
+	
+	if (!debug_state.supports_data_breakpoints)
+		throw new Error('Data breakpoints are not supported by the current debug adapter');
+	
+	try {
+		const result = await debug_session.customRequest('setDataBreakpoints', {
+			breakpoints: data_breakpoints
+		});
+		
+		debug_state.data_breakpoints.clear();
+		if (result.breakpoints) {
+			for (let i = 0; i < result.breakpoints.length; i++) {
+				const bp = result.breakpoints[i];
+				const original = data_breakpoints[i];
+				
+				if (bp.verified) {
+					debug_state.data_breakpoints.add({
+						dataId: original.dataId,
+						accessType: original.accessType,
+						condition: original.condition,
+						description: original.description || 'Data breakpoint',
+						verified: bp.verified,
+						message: bp.message
+					});
+				}
+			}
+		}
+		
+		return result;
+	} catch (error) {
+		throw new Error(`Failed to set data breakpoints: ${error.message}`);
+	}
+};
+
+const get_data_breakpoints = () => {
+	return Array.from(debug_state.data_breakpoints).map(bp => ({
+		dataId: bp.dataId,
+		accessType: bp.accessType,
+		condition: bp.condition,
+		description: bp.description,
+		verified: bp.verified,
+		message: bp.message,
+		type: 'data'
 	}));
 };
 
@@ -717,7 +817,8 @@ const handle_command = async (client, message) => {
 			case 'breakpoints':
 				if (data.action === 'list' || !data.action) {
 					const breakpoints = get_breakpoints();
-					result = { breakpoints };
+					const dataBreakpoints = get_data_breakpoints();
+					result = { breakpoints: [...breakpoints, ...dataBreakpoints] };
 				} else if (data.action === 'set') {
 					if (!data.file || !data.lines) {
 						throw new Error('File and lines are required for set action');
@@ -731,6 +832,20 @@ const handle_command = async (client, message) => {
 				} else {
 					throw new Error(`Unknown breakpoint action: ${data.action}`);
 				}
+				break;
+				
+			case 'dataBreakpointInfo':
+				if (!data.name) {
+					throw new Error('Variable name is required');
+				}
+				result = await get_data_breakpoint_info(data.name, data.variablesReference);
+				break;
+				
+			case 'setDataBreakpoints':
+				if (!Array.isArray(data.breakpoints)) {
+					throw new Error('Breakpoints array is required');
+				}
+				result = await set_data_breakpoints(data.breakpoints);
 				break;
 				
 			case 'control':
@@ -861,7 +976,7 @@ const handle_websocket_connection = (ws) => {
 };
 
 const setup_debug_listeners = () => {
-	vscode.debug.onDidStartDebugSession(session => {
+	vscode.debug.onDidStartDebugSession(async (session) => {
 		try {
 			current_session = session;
 			debug_state.is_running = true;
@@ -870,6 +985,10 @@ const setup_debug_listeners = () => {
 			debug_state.stop_location = null;
 			debug_state.stopped_at_breakpoint = false;
 			console.log(`VDB: Debug session started - ${session.name} (${session.type})`);
+			
+			setTimeout(async () => {
+				await check_data_breakpoint_capabilities();
+			}, 1000);
 			
 			broadcast_event('dap:session_started', {
 				name: session.name,
@@ -896,12 +1015,14 @@ const setup_debug_listeners = () => {
 					call_stack: [], 
 					threads: [],
 					breakpoints: new Set(),
+					data_breakpoints: new Set(),
 					is_running: false,
 					current_frame: null,
 					execution_state: 'unknown',
 					stop_reason: null,
 					stop_location: null,
-					stopped_at_breakpoint: false
+					stopped_at_breakpoint: false,
+					supports_data_breakpoints: false
 				};
 			}
 		} catch (error) {

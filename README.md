@@ -119,6 +119,26 @@ Removed breakpoint(s) at lines 25 from C:\path\to\file.c
 Removed all breakpoints from C:\path\to\file.c
 ```
 
+#### vdb break watch
+
+Add data breakpoints (watchpoints) to monitor variable or memory access:
+
+```bash
+# Watch variable for any access (read or write)
+> vdb break watch counter
+Added data breakpoint for 'counter' (access)
+
+# Watch variable only when written to
+> vdb break watch person.age write
+Added data breakpoint for 'person.age' (write)
+
+# Watch memory address for reads
+> vdb break watch 0x1234ABCD read
+Added data breakpoint for '0x1234ABCD' (read)
+```
+
+**Note:** Watchpoint support depends on the debug adapter.
+
 ### Debug Information
 
 #### vdb status
@@ -372,6 +392,7 @@ Breakpoint Management:
 break list          List all breakpoints
 break add <file> <line> [condition]  Add breakpoint (with optional condition)
 break remove <file> [line] [line2...] Remove breakpoints
+break watch <var/addr> [read|write|access] Add data breakpoint/watchpoint
 
 Debug Information (requires active session):
 var <name>          Get variable value
