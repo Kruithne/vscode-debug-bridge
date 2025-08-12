@@ -851,7 +851,7 @@ const setup_debug_listeners = () => {
 		debug_state.stopped_at_breakpoint = false;
 		console.log(`VDB: Debug session started - ${session.name} (${session.type})`);
 		
-		broadcast_event('session_started', {
+		broadcast_event('vdb:session_started', {
 			name: session.name,
 			type: session.type
 		});
@@ -861,7 +861,7 @@ const setup_debug_listeners = () => {
 				debug_state.execution_state = 'stopped';
 				debug_state.stop_reason = event.body?.reason || 'unknown';
 				
-				broadcast_event('stopped', {
+				broadcast_event('dap:stopped', {
 					reason: debug_state.stop_reason,
 					threadId: event.body?.threadId
 				});
@@ -874,7 +874,7 @@ const setup_debug_listeners = () => {
 							debug_state.stopped_at_breakpoint = !!breakpoint;
 							
 							if (breakpoint) {
-								broadcast_event('breakpoint', {
+								broadcast_event('dap:breakpoint', {
 									location,
 									condition: breakpoint.condition,
 									hitCondition: breakpoint.hitCondition,
@@ -894,7 +894,7 @@ const setup_debug_listeners = () => {
 				debug_state.stop_location = null;
 				debug_state.stopped_at_breakpoint = false;
 				
-				broadcast_event('continued', {
+				broadcast_event('dap:continued', {
 					threadId: event.body?.threadId
 				});
 				
@@ -907,7 +907,7 @@ const setup_debug_listeners = () => {
 		if (session === current_session) {
 			console.log(`VDB: Debug session terminated - ${session.name}`);
 			
-			broadcast_event('session_terminated', {
+			broadcast_event('vdb:session_terminated', {
 				name: session.name,
 				type: session.type
 			});

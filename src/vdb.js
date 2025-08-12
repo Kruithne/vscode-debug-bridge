@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+const ARRAY_EMPTY = [];
+
 function create_vscode_extension_client(port = 3579, host = 'localhost') {
 	let ws = null;
 	let connected = false;
@@ -9,6 +11,7 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 	let command_id_counter = 0;
 	
 	const event_listeners = new Map();
+	const ns_event_listeners = new Map();
 	
 	const url = `ws://${host}:${port}`;
 	const generate_command_id = () => `cmd_${++command_id_counter}_${Date.now()}`;
@@ -78,14 +81,26 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 	};
 	
 	const emit_event = (event, data) => {
-		const listeners = event_listeners.get(event) || [];
-		listeners.forEach(callback => {
+		const listeners = event_listeners.get(event) || ARRAY_EMPTY;
+
+		for (const callback of listeners) {
 			try {
 				callback(data);
 			} catch (error) {
 				console.warn(`VDB: Event listener error for '${event}':`, error.message);
 			}
-		});
+		}
+
+		const [event_ns, event_name] = event.split(':');
+		const ns_listeners = ns_event_listeners.get(event_ns) || ARRAY_EMPTY;
+
+		for (const callback of ns_listeners) {
+			try {
+				callback(event_name, data);
+			} catch (error) {
+				console.warn(`VDB: Namespace listener error for '${namespace}' on event '${event}':`, error.message);
+			}
+		}
 	};
 	
 	const send_command = async (command, data = {}, timeout = 10000) => {
@@ -169,6 +184,41 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 					listeners.splice(index, 1);
 					if (listeners.length === 0)
 						event_listeners.delete(event);
+				}
+			}
+		},
+		
+		on_namespace(namespace, callback) {
+			if (typeof callback !== 'function')
+				throw new Error('Callback must be a function');
+			
+			if (typeof namespace !== 'string' || namespace.length === 0)
+				throw new Error('Namespace must be a non-empty string');
+		
+			if (!ns_event_listeners.has(namespace))
+				ns_event_listeners.set(namespace, []);
+
+			ns_event_listeners.get(namespace).push(callback);
+		},
+		
+		off_namespace(namespace, callback = null) {
+			if (!ns_event_listeners.has(namespace))
+				return;
+
+			if (callback === null) {
+				// clear the whole namespace
+				ns_event_listeners.delete(namespace);
+			} else {
+				// only clear the one specific callback
+				const listeners = ns_event_listeners.get(namespace);
+				const index = listeners.indexOf(callback);
+
+				if (index !== -1) {
+					listeners.splice(index, 1);
+
+					// no more listeners, get rid of the array
+					if (listeners.length === 0)
+						ns_event_listeners.delete(namespace);
 				}
 			}
 		},
@@ -429,6 +479,32 @@ function format_disassembly(instructions) {
 	return result.trim();
 }
 
+function format_event(event_name, data) {
+	let parts = [event_name];
+	
+	if (data && typeof data === 'object') {
+		for (const [key, value] of Object.entries(data)) {
+			if (value !== null && value !== undefined) {
+				if (key === 'location' && typeof value === 'object') {
+					if (value.file && value.line) {
+						parts.push(`file=${value.file}`);
+						parts.push(`line=${value.line}`);
+					}
+
+					if (value.function)
+						parts.push(`function=${value.function}`);
+				} else if (key === 'threadId') {
+					parts.push(`thread=${value}`);
+				} else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+					parts.push(`${key}=${value}`);
+				}
+			}
+		}
+	}
+	
+	return parts.join(' ');
+}
+
 function create_vscode_debug_bridge(port = 3579, host = 'localhost') {
 	const bridge = {
 		extension_client: create_vscode_extension_client(port, host),
@@ -570,7 +646,7 @@ async function main() {
 		
 		switch (command) {
 			case 'wait':
-				const wait_events = args[1] ? args[1].split(',') : ['stopped'];
+				const wait_events = args[1] ? args[1].split(',') : ['dap:stopped'];
 				const timeout = args[2] ? parseInt(args[2]) * 1000 : 60000;
 				
 				console.log(`waiting for events: ${wait_events.join(', ')} (timeout: ${timeout/1000}s)`);
@@ -584,6 +660,25 @@ async function main() {
 				} catch (error) {
 					console.error(error.message);
 				}
+				break;
+				
+			case 'events':
+				console.log('monitoring debug events (press ctrl+c to stop)...');
+				
+				const event_handler = (event_name, data) => {
+					const formatted = format_event(event_name, data);
+					console.log(formatted);
+				};
+				
+				vdb.extension_client.on_namespace('dap:', event_handler);
+				
+				process.on('SIGINT', () => {
+					console.log('aborted');
+					vdb.extension_client.off_namespace('dap:');
+					process.exit(0);
+				});
+				
+				await new Promise(() => {});
 				break;
 		
 			case 'var':
@@ -998,6 +1093,7 @@ async function main() {
 				console.log('start [profile]     Start debugging (optionally specify profile name)');
 				console.log('status              Check debug and extension status (default)');
 				console.log('wait [events] [timeout] Wait for debug events (comma-separated)');
+				console.log('events              Monitor all DAP events in real-time');
 				console.log('');
 				console.log('Breakpoint Management:');
 				console.log('break list          List all breakpoints');
