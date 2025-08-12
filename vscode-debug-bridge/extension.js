@@ -80,6 +80,9 @@ const get_variables = async () => {
 	
 	if (scopes.scopes) {
 		for (const scope of scopes.scopes) {
+			if (scope.name.toLowerCase().includes('register'))
+				continue;
+			
 			if (scope.variablesReference > 0) {
 				const scope_vars = await debug_session.customRequest('variables', {
 					variablesReference: scope.variablesReference
