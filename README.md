@@ -9,10 +9,10 @@
 ```bash
 git clone https://github.com/Kruithne/vscode-debug-bridge.git
 
-# link using your preferred js runtime
-npm link
-bun link
-# .. etc
+bun link # or npm, etc
+
+cd vscode-debug-bridge
+bun install # or npm, etc
 
 # unix
 ./install-extension.sh

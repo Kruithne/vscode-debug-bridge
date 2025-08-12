@@ -1,7 +1,7 @@
 {
 	"name": "vscode-debug-bridge",
 	"displayName": "VSCode Debug Bridge",
-	"description": "HTTP API bridge allowing direct access to debug session information",
+	"description": "WebSocket bridge allowing real-time access to debug session information",
 	"version": "1.0.0",
 	"publisher": "vdb",
 	"engines": {
@@ -37,7 +37,7 @@
 				"vdb.port": {
 					"type": "number",
 					"default": 3579,
-					"description": "HTTP API port for debug communication",
+					"description": "WebSocket port for debug communication",
 					"minimum": 1024,
 					"maximum": 65535
 				},
@@ -49,12 +49,15 @@
 				"vdb.host": {
 					"type": "string",
 					"default": "localhost",
-					"description": "Host to bind the HTTP server to"
+					"description": "Host to bind the WebSocket server to"
 				}
 			}
 		}
 	},
 	"devDependencies": {
 		"@types/vscode": "^1.60.0"
+	},
+	"dependencies": {
+		"ws": "^8.14.2"
 	}
 }

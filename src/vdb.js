@@ -1,139 +1,305 @@
 #!/usr/bin/env bun
 
-
-function create_vscode_extension_client(port = 3579) {
-	const base_url = `http://localhost:${port}`;
+function create_vscode_extension_client(port = 3579, host = 'localhost') {
+	let ws = null;
+	let connected = false;
+	let connecting = false
 	
-	async function get_endpoint(endpoint, payload = null) {
-		const url = `${base_url}/${endpoint}`;
-		const options = payload ? {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(payload)
-		} : {};
+	const pending_commands = new Map();
+	let command_id_counter = 0;
+	
+	const event_listeners = new Map();
+	
+	const url = `ws://${host}:${port}`;
+	const generate_command_id = () => `cmd_${++command_id_counter}_${Date.now()}`;
+	
+	const connect = () => {
+		if (connecting || connected) return Promise.resolve();
 		
-		const response = await fetch(url, options);
+		connecting = true;
 		
-		if (!response.ok) {
-			let error;
+		return new Promise((resolve, reject) => {
 			try {
-				error = await response.json();
-			} catch {
-				throw new Error(`HTTP ${response.status}`);
+				ws = new WebSocket(url);
+				
+				ws.onopen = () => {
+					connected = true;
+					connecting = false;
+					resolve();
+				};
+				
+				ws.onmessage = (event) => {
+					try {
+						const message = JSON.parse(event.data);
+						handle_message(message);
+					} catch (error) {
+						console.warn('VDB: Failed to parse message:', error.message);
+					}
+				};
+				
+				ws.onclose = (event) => {
+					connected = false;
+					connecting = false;
+					
+					for (const [id, { reject }] of pending_commands) {
+						reject(new Error('Connection closed'));
+					}
+					pending_commands.clear();
+				};
+				
+				ws.onerror = (error) => {
+					connecting = false;
+					if (!connected) {
+						reject(new Error(`Failed to connect to WebSocket at ${url}`));
+					}
+				};
+				
+			} catch (error) {
+				connecting = false;
+				reject(error);
 			}
-			throw new Error(error.error || `Failed to ${endpoint}`);
+		});
+	};
+	
+	const handle_message = (message) => {
+		if (message.type === 'event') {
+			emit_event(message.event, message.data);
+		} else if (message.id) {
+			const pending = pending_commands.get(message.id);
+			if (pending) {
+				pending_commands.delete(message.id);
+				if (message.success) {
+					pending.resolve(message.data);
+				} else {
+					pending.reject(new Error(message.error || 'Command failed'));
+				}
+			}
 		}
+	};
+	
+	const emit_event = (event, data) => {
+		const listeners = event_listeners.get(event) || [];
+		listeners.forEach(callback => {
+			try {
+				callback(data);
+			} catch (error) {
+				console.warn(`VDB: Event listener error for '${event}':`, error.message);
+			}
+		});
+	};
+	
+	const send_command = async (command, data = {}, timeout = 10000) => {
+		if (!connected)
+			await connect();
 		
-		try {
-			return await response.json();
-		} catch {
-			throw new Error('Invalid JSON response');
-		}
-	}
+		return new Promise((resolve, reject) => {
+			const id = generate_command_id();
+			const message = {
+				id,
+				command,
+				data
+			};
+			
+			const timeout_id = setTimeout(() => {
+				pending_commands.delete(id);
+				reject(new Error(`Command '${command}' timed out after ${timeout}ms`));
+			}, timeout);
+			
+			pending_commands.set(id, {
+				resolve: (data) => {
+					clearTimeout(timeout_id);
+					resolve(data);
+				},
+				reject: (error) => {
+					clearTimeout(timeout_id);
+					reject(error);
+				}
+			});
+			
+			try {
+				ws.send(JSON.stringify(message));
+			} catch (error) {
+				clearTimeout(timeout_id);
+				pending_commands.delete(id);
+				reject(new Error(`Failed to send command: ${error.message}`));
+			}
+		});
+	};
 	
 	const client = {
-		base_url,
+		url,
+		
+		async connect() {
+			return await connect();
+		},
+		
+		disconnect() {
+			if (ws) {
+				ws.close(1000); // Clean close
+				ws = null;
+			}
+			connected = false;
+			connecting = false;
+		},
+		
+		get connected() {
+			return connected;
+		},
+		
+		on(event, callback) {
+			if (typeof callback !== 'function')
+				throw new Error('Callback must be a function');
+			
+			if (!event_listeners.has(event))
+				event_listeners.set(event, []);
+			
+			event_listeners.get(event).push(callback);
+		},
+		
+		off(event, callback = null) {
+			if (!event_listeners.has(event))
+				return;
+			
+			if (callback === null) {
+				event_listeners.delete(event);
+			} else {
+				const listeners = event_listeners.get(event);
+				const index = listeners.indexOf(callback);
+				if (index !== -1) {
+					listeners.splice(index, 1);
+					if (listeners.length === 0)
+						event_listeners.delete(event);
+				}
+			}
+		},
 		
 		async is_available() {
 			try {
-				const response = await fetch(`${client.base_url}/status`);
-				return response.ok;
-			}
-			catch (error) {
+				await this.get_status();
+				return true;
+			} catch (error) {
 				return false;
 			}
 		},
 		
 		async get_status() {
-			return await get_endpoint('status');
+			return await send_command('status');
 		},
 		
 		async get_variables() {
-			return await get_endpoint('variables');
+			return await send_command('variables');
 		},
 		
 		async get_variable(name) {
-			return await get_endpoint(`variables/${encodeURIComponent(name)}`);
+			return await send_command('variables', { name });
 		},
 		
 		async get_call_stack() {
-			return await get_endpoint('callstack');
+			const result = await send_command('callstack');
+			return result;
 		},
 		
 		async get_threads() {
-			return await get_endpoint('threads');
+			return await send_command('threads');
 		},
 		
 		async get_registers() {
-			return await get_endpoint('registers');
+			return await send_command('registers');
 		},
 		
 		async evaluate_expression(expression, frame_id = null, context = 'watch') {
-			return await get_endpoint('evaluate', { expression, frameId: frame_id, context });
+			return await send_command('evaluate', { 
+					expression, 
+					frameId: frame_id, 
+					context 
+				});
 		},
 		
 		async read_memory(address, count = 64, offset = 0) {
-			return await get_endpoint('memory', { address, count, offset });
+			return await send_command('memory', { address, count, offset });
 		},
 		
 		async set_breakpoints(file, lines, condition = null) {
-			const payload = { file, lines, action: 'set' };
-			if (condition) payload.condition = condition;
-			return await get_endpoint('breakpoints', payload);
+			const data = { file, lines, action: 'set' };
+			if (condition)
+				data.condition = condition;
+			
+			return await send_command('breakpoints', data);
 		},
 		
 		async clear_breakpoints(file, lines = null) {
-			return await get_endpoint('breakpoints', { file, lines, action: 'clear' });
+			return await send_command('breakpoints', { file, lines, action: 'clear' });
 		},
 		
 		async continue(thread_id = null) {
-			return await client.control('continue', thread_id);
+			return await send_command('control', { action: 'continue', threadId: thread_id });
 		},
 		
 		async step_over(thread_id = null) {
-			return await client.control('stepOver', thread_id);
+			return await send_command('control', { action: 'stepOver', threadId: thread_id });
 		},
 		
 		async step_in(thread_id = null) {
-			return await client.control('stepIn', thread_id);
+			return await send_command('control', { action: 'stepIn', threadId: thread_id });
 		},
 		
 		async step_out(thread_id = null) {
-			return await client.control('stepOut', thread_id);
+			return await send_command('control', { action: 'stepOut', threadId: thread_id });
 		},
 		
 		async pause(thread_id = null) {
-			return await client.control('pause', thread_id);
+			return await send_command('control', { action: 'pause', threadId: thread_id });
 		},
 		
 		async control(action, thread_id = null) {
-			return await get_endpoint('control', { action, threadId: thread_id });
+			return await send_command('control', { action, threadId: thread_id });
 		},
 		
 		async get_profiles() {
-			return await get_endpoint('profiles');
+			return await send_command('profiles');
 		},
 		
 		async start_debugging(profile_name = null) {
-			return await get_endpoint('start', { profile: profile_name });
+			return await send_command('start', { profile: profile_name });
 		},
 		
 		async get_all_breakpoints() {
-			return await get_endpoint('breakpoints');
+			return await send_command('breakpoints');
 		},
 		
 		async add_breakpoints(file, lines, condition = null) {
-			const payload = { file, lines, action: 'set' };
-			if (condition) payload.condition = condition;
-			return await get_endpoint('breakpoints', payload);
+			return await this.set_breakpoints(file, lines, condition);
 		},
 		
 		async remove_breakpoints(file, lines = null) {
-			return await get_endpoint('breakpoints', { file, lines, action: 'clear' });
+			return await this.clear_breakpoints(file, lines);
 		},
 		
 		async disassemble(address = null, count = 10, offset = 0) {
-			return await get_endpoint('disassemble', { address, count, offset });
+			return await send_command('disassemble', { address, count, offset });
+		},
+		
+		async wait_for_event(events, timeout = 60000) {
+			if (typeof events === 'string')
+				events = [events];
+			
+			return new Promise((resolve, reject) => {
+					const timeout_id = setTimeout(() => {
+						events.forEach(event => client.off(event, event_handler));
+						reject(new Error(`Timeout waiting for events: ${events.join(', ')}`));
+					}, timeout);
+					
+					const event_handler = (data) => {
+						clearTimeout(timeout_id);
+						events.forEach(event => client.off(event, event_handler));
+						resolve({ event: arguments.callee.event_name, data });
+					};
+					
+					events.forEach(event => {
+						event_handler.event_name = event;
+						client.on(event, event_handler);
+					});
+				});
 		}
 	};
 	
@@ -149,12 +315,10 @@ function format_hex_dump(buffer, start_address = '0x0') {
 	
 	for (let i = 0; i < buffer.length; i += bytes_per_line) {
 		let addr = start_address;
-		if (typeof start_address === 'string' && start_address.startsWith('0x')) {
+		if (typeof start_address === 'string' && start_address.startsWith('0x'))
 			addr = `0x${(parseInt(start_address, 16) + i).toString(16).padStart(8, '0').toUpperCase()}`;
-		}
-		else {
+		else
 			addr = `${start_address}+${i}`;
-		}
 		
 		result += `  ${addr}: `;
 		
@@ -240,14 +404,12 @@ function format_disassembly(instructions) {
 	for (const instr of instructions) {
 		let line = '';
 		
-		// Format address
 		if (instr.address) {
 			line += instr.address.padEnd(18, ' ');
 		} else {
 			line += ''.padEnd(18, ' ');
 		}
 		
-		// Format bytes/opcode
 		if (instr.instructionBytes) {
 			const bytes = instr.instructionBytes.split(' ').join(' ');
 			line += bytes.padEnd(20, ' ');
@@ -255,15 +417,11 @@ function format_disassembly(instructions) {
 			line += ''.padEnd(20, ' ');
 		}
 		
-		// Format instruction
-		if (instr.instruction) {
+		if (instr.instruction)
 			line += instr.instruction;
-		}
 		
-		// Add symbol information if available
-		if (instr.symbol) {
+		if (instr.symbol)
 			line += `  <${instr.symbol}>`;
-		}
 		
 		result += line + '\n';
 	}
@@ -271,16 +429,21 @@ function format_disassembly(instructions) {
 	return result.trim();
 }
 
-function create_vscode_debug_bridge(port = 3579) {
+function create_vscode_debug_bridge(port = 3579, host = 'localhost') {
 	const bridge = {
-		extension_client: create_vscode_extension_client(port),
+		extension_client: create_vscode_extension_client(port, host),
 		extension_available: false,
 		
 		async initialize() {
-			bridge.extension_available = await bridge.extension_client.is_available();
+			try {
+				await bridge.extension_client.connect();
+				bridge.extension_available = bridge.extension_client.connected;
+			} catch (error) {
+				console.warn(`Failed to connect to VSCode extension: ${error.message}`);
+				bridge.extension_available = false;
+			}
 			return bridge.extension_available;
 		},
-		
 		
 		async get_status_info() {
 			const base_info = {
@@ -338,7 +501,7 @@ function create_vscode_debug_bridge(port = 3579) {
 				throw new Error('Expression evaluation requires VSCode Debug Bridge extension');
 			
 			const result = await bridge.extension_client.evaluate_expression(expression);
-			return result.result;
+			return result;
 		},
 		
 		async get_call_stack() {
@@ -346,7 +509,7 @@ function create_vscode_debug_bridge(port = 3579) {
 				throw new Error('Call stack access requires VSCode Debug Bridge extension');
 			
 			const result = await bridge.extension_client.get_call_stack();
-			return result.call_stack;
+			return result;
 		},
 		
 		async get_registers() {
@@ -364,6 +527,7 @@ function create_vscode_debug_bridge(port = 3579) {
 function parse_args(args) {
 	const parsed = {
 		port: 3579,
+		host: 'localhost',
 		args: []
 	};
 	
@@ -375,7 +539,9 @@ function parse_args(args) {
 				case 'port':
 					parsed.port = parseInt(value);
 					break;
-
+				case 'host':
+					parsed.host = value;
+					break;
 				default:
 					console.log(`unrecognized flag ${key}`);
 			}
@@ -389,18 +555,37 @@ function parse_args(args) {
 
 async function main() {
 	const raw_args = process.argv.slice(2);
-	const { port, args } = parse_args(raw_args);
+	const { port, host, args } = parse_args(raw_args);
 	const command = args[0] || 'status';
 	
-	const vdb = create_vscode_debug_bridge(port);
+	const vdb = create_vscode_debug_bridge(port, host);
 	
 	try {
 		const extension_available = await vdb.initialize();
 		
-		if (!extension_available)
+		if (!extension_available && command !== 'status') {
 			console.error('extension not available - limited capabilities');
+			return;
+		}
 		
 		switch (command) {
+			case 'wait':
+				const wait_events = args[1] ? args[1].split(',') : ['stopped'];
+				const timeout = args[2] ? parseInt(args[2]) * 1000 : 60000;
+				
+				console.log(`waiting for events: ${wait_events.join(', ')} (timeout: ${timeout/1000}s)`);
+				
+				try {
+					const result = await vdb.extension_client.wait_for_event(wait_events, timeout);
+					console.log(`event occurred: ${result.event}`);
+					if (result.data) {
+						console.log(JSON.stringify(result.data, null, 2));
+					}
+				} catch (error) {
+					console.error(error.message);
+				}
+				break;
+		
 			case 'var':
 				const var_name = args[1];
 				if (!var_name) {
@@ -463,17 +648,17 @@ async function main() {
 					const result = await vdb.extension_client.read_memory(address, count, offset);
 					console.log(`address=${result.address} size=${count}`);
 					
-					if (result.result?.data) {
-						const data = Buffer.from(result.result.data, 'base64');
-						const hex_dump = format_hex_dump(data, result.result.address || address);
+					if (result.data) {
+						const data = Buffer.from(result.data, 'base64');
+						const hex_dump = format_hex_dump(data, result.address || address);
 						console.log(hex_dump);
 					}
 					else {
 						console.log('No data available');
 					}
 					
-					if (result.result?.unreadableBytes > 0)
-						console.log(`unreadable_bytes=${result.result.unreadableBytes}`);
+					if (result.unreadable_bytes > 0)
+						console.log(`unreadable_bytes=${result.unreadable_bytes}`);
 				}
 				catch (error) {
 					console.error(error.message);
@@ -812,6 +997,7 @@ async function main() {
 				console.log('profiles            List available debug configurations');
 				console.log('start [profile]     Start debugging (optionally specify profile name)');
 				console.log('status              Check debug and extension status (default)');
+				console.log('wait [events] [timeout] Wait for debug events (comma-separated)');
 				console.log('');
 				console.log('Breakpoint Management:');
 				console.log('break list          List all breakpoints');
@@ -837,11 +1023,15 @@ async function main() {
 				console.log('');
 				console.log('Options:');
 				console.log('--port=<port>       Connect to extension on custom port (default: 3579)');
+				console.log('--host=<host>       Connect to extension on custom host (default: localhost)');
 		}
 	}
 	catch (error) {
 		console.error('error:', error.message);
 		process.exit(1);
+	} finally {
+		if (vdb?.extension_client?.connected)
+			vdb.extension_client.disconnect();
 	}
 }
 

@@ -1,7 +1,7 @@
 const vscode = require('vscode');
-const http = require('http');
+const { WebSocketServer } = require('ws');
 
-let server = null;
+let wss = null;
 let current_session = null;
 let debug_state = {
 	variables: {},
@@ -10,87 +10,50 @@ let debug_state = {
 	breakpoints: new Set(),
 	is_running: false,
 	current_frame: null,
-	execution_state: 'unknown', // 'running', 'stopped', 'unknown'
-	stop_reason: null, // 'breakpoint', 'step', 'exception', 'pause', 'entry', etc.
-	stop_location: null, // { file, line, function }
+	execution_state: 'unknown',
+	stop_reason: null,
+	stop_location: null,
 	stopped_at_breakpoint: false
 };
 
-const parse_request_body = (req) => {
-	return new Promise((resolve, reject) => {
-		let body = '';
-		req.on('data', chunk => {
-			body += chunk.toString();
-		});
+const clients = new Set();
 
-		req.on('end', () => {
+const broadcast_event = (event_type, data) => {
+	const message = JSON.stringify({
+		type: 'event',
+		event: event_type,
+		data,
+		timestamp: new Date().toISOString()
+	});
+	
+	clients.forEach(client => {
+		if (client.readyState === client.OPEN) {
 			try {
-				resolve(body ? JSON.parse(body) : {});
+				client.send(message);
 			} catch (error) {
-				reject(error);
+				console.warn('VDB: Failed to send event to client:', error.message);
 			}
-		});
-	});
-};
-
-const send_json_response = (res, status, data) => {
-	res.writeHead(status, { 
-		'Content-Type': 'application/json',
-		'Access-Control-Allow-Origin': '*',
-		'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-		'Access-Control-Allow-Headers': 'Content-Type'
-	});
-	res.end(JSON.stringify(data));
-};
-
-const handle_status = async (req, res) => {
-	let currentExecutionState = debug_state.execution_state;
-	let currentStopLocation = debug_state.stop_location;
-	let stoppedAtBreakpoint = debug_state.stopped_at_breakpoint;
-	
-	if (current_session) {
-		try {
-			const callStack = await get_call_stack();
-			if (callStack && callStack.length > 0 && callStack[0].frames && callStack[0].frames.length > 0) {
-				const topFrame = callStack[0].frames[0];
-				currentExecutionState = 'stopped';
-				currentStopLocation = {
-					file: topFrame.source,
-					line: topFrame.line,
-					function: topFrame.name,
-					column: topFrame.column
-				};
-				
-				if (topFrame.source && topFrame.line) {
-					const breakpoint = check_if_stopped_at_breakpoint(topFrame.source, topFrame.line);
-					stoppedAtBreakpoint = !!breakpoint;
-					if (breakpoint) {
-						debug_state.execution_state = 'stopped';
-						debug_state.stop_reason = 'breakpoint';
-						debug_state.stop_location = currentStopLocation;
-						debug_state.stopped_at_breakpoint = true;
-					}
-				}
-			}
-		} catch (error) {
-			if (currentExecutionState === 'unknown')
-				currentExecutionState = 'running';
 		}
-	}
-	
-	send_json_response(res, 200, {
-		bridge_active: !!server,
-		debug_session_active: !!current_session,
-		session_name: current_session?.name || null,
-		session_type: current_session?.type || null,
-		is_running: debug_state.is_running,
-		execution_state: currentExecutionState,
-		stop_reason: debug_state.stop_reason || (stoppedAtBreakpoint ? 'breakpoint' : null),
-		stop_location: currentStopLocation,
-		stopped_at_breakpoint: stoppedAtBreakpoint,
-		timestamp: new Date().toISOString(),
-		port: server?.address()?.port || null
 	});
+};
+
+const send_response = (client, id, success, data = null, error = null) => {
+	const response = {
+		id,
+		success,
+		data: success ? data : null,
+		error: success ? null : error
+	};
+	
+	try {
+		client.send(JSON.stringify(response));
+	} catch (err) {
+		console.warn('VDB: Failed to send response to client:', err.message);
+	}
+};
+
+const send_error = (client, id, error_message) => {
+	send_response(client, id, false, null, error_message);
 };
 
 const get_variables = async () => {
@@ -139,38 +102,12 @@ const get_variables = async () => {
 	return variables;
 };
 
-const handle_variables = async (req, res) => {
-	try {
-		const variables = await get_variables();
-		send_json_response(res, 200, { 
-			variables, 
-			timestamp: new Date().toISOString(),
-			session_name: current_session.name
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
 const get_variable = async (name) => {
 	const variables = await get_variables();
 	if (!variables[name])
 		throw new Error(`Variable '${name}' not found in current scope`);
 	
 	return variables[name];
-};
-
-const handle_variable_by_name = async (req, res, variable_name) => {
-	try {
-		const variable = await get_variable(variable_name);
-		send_json_response(res, 200, { 
-			name: variable_name, 
-			...variable,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 404, { error: `Variable '${variable_name}' not found: ${error.message}` });
-	}
 };
 
 const evaluate_expression = async (expression, frame_id = null, context = 'watch') => {
@@ -204,27 +141,6 @@ const evaluate_expression = async (expression, frame_id = null, context = 'watch
 	};
 };
 
-const handle_evaluate = async (req, res) => {
-	try {
-		const body = await parse_request_body(req);
-		const { expression, frameId = null, context = 'watch' } = body;
-		
-		if (!expression) {
-			send_json_response(res, 400, { error: 'Expression is required' });
-			return;
-		}
-		
-		const result = await evaluate_expression(expression, frameId, context);
-		send_json_response(res, 200, { 
-			expression, 
-			result,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
 const get_call_stack = async () => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
@@ -247,25 +163,14 @@ const get_call_stack = async () => {
 					name: frame.name,
 					source: frame.source?.path || frame.source?.name,
 					line: frame.line,
-					column: frame.column
+					column: frame.column,
+					instruction_pointer_reference: frame.instructionPointerReference
 				})) || []
 			});
 		}
 	}
 	
 	return call_stacks;
-};
-
-const handle_call_stack = async (req, res) => {
-	try {
-		const stack = await get_call_stack();
-		send_json_response(res, 200, { 
-			call_stack: stack,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
 };
 
 const get_threads = async () => {
@@ -316,6 +221,32 @@ const get_registers = async () => {
 	return registers;
 };
 
+const process_register_variables = async (debug_session, variables, registers, category_name) => {
+	for (const variable of variables) {
+		if (variable.variablesReference > 0) {
+			const nested_vars = await debug_session.customRequest('variables', {
+				variablesReference: variable.variablesReference
+			});
+			
+			if (nested_vars.variables) {
+				if (!registers[variable.name])
+					registers[variable.name] = {};
+
+				await process_register_variables(debug_session, nested_vars.variables, registers[variable.name], variable.name);
+			}
+		} else {
+			if (!registers[category_name])
+				registers[category_name] = {};
+
+			registers[category_name][variable.name] = {
+				value: variable.value,
+				type: variable.type,
+				description: variable.evaluateName || variable.name
+			};
+		}
+	}
+};
+
 const get_disassembly = async (address = null, count = 10, offset = 0) => {
 	if (!current_session)
 		throw new Error('No active debug session');
@@ -361,72 +292,6 @@ const get_disassembly = async (address = null, count = 10, offset = 0) => {
 		};
 	} catch (error) {
 		throw new Error(`Failed to disassemble at address ${memory_reference}: ${error.message}`);
-	}
-};
-
-const process_register_variables = async (debug_session, variables, registers, category_name) => {
-	for (const variable of variables) {
-		if (variable.variablesReference > 0) {
-			const nested_vars = await debug_session.customRequest('variables', {
-				variablesReference: variable.variablesReference
-			});
-			
-			if (nested_vars.variables) {
-				if (!registers[variable.name])
-					registers[variable.name] = {};
-
-				await process_register_variables(debug_session, nested_vars.variables, registers[variable.name], variable.name);
-			}
-		} else {
-			if (!registers[category_name])
-				registers[category_name] = {};
-
-			registers[category_name][variable.name] = {
-				value: variable.value,
-				type: variable.type,
-				description: variable.evaluateName || variable.name
-			};
-		}
-	}
-};
-
-const handle_threads = async (req, res) => {
-	try {
-		const threads = await get_threads();
-		send_json_response(res, 200, { 
-			threads,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
-const handle_registers = async (req, res) => {
-	try {
-		const registers = await get_registers();
-		send_json_response(res, 200, { 
-			registers,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
-const handle_disassemble = async (req, res) => {
-	try {
-		const body = await parse_request_body(req);
-		const { address = null, count = 10, offset = 0 } = body;
-		
-		const result = await get_disassembly(address, count, offset);
-		send_json_response(res, 200, { 
-			address: result.address,
-			instructions: result.instructions,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
 	}
 };
 
@@ -554,53 +419,6 @@ const get_breakpoints = () => {
 	}));
 };
 
-const handle_breakpoints = async (req, res) => {
-	try {
-		if (req.method === 'GET') {
-			// List all breakpoints
-			const breakpoints = get_breakpoints();
-			send_json_response(res, 200, { 
-				breakpoints,
-				timestamp: new Date().toISOString()
-			});
-			return;
-		}
-		
-		const body = await parse_request_body(req);
-		const { file, lines, action = 'set', condition = null } = body;
-		
-		if (!file) {
-			send_json_response(res, 400, { error: 'File is required' });
-			return;
-		}
-		
-		let result;
-		if (action === 'set') {
-			if (!lines) {
-				send_json_response(res, 400, { error: 'Lines are required for set action' });
-				return;
-			}
-			result = await set_breakpoints(file, lines, condition);
-		} else if (action === 'clear') {
-			result = await clear_breakpoints(file, lines);
-		} else {
-			send_json_response(res, 400, { error: 'Action must be "set" or "clear"' });
-			return;
-		}
-		
-		send_json_response(res, 200, { 
-			success: true, 
-			file, 
-			lines, 
-			action,
-			result,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
 const debug_continue = async (thread_id = null) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
@@ -666,53 +484,6 @@ const debug_pause = async (thread_id = null) => {
 	return await debug_session.customRequest('pause', { threadId: thread_id });
 };
 
-const handle_control = async (req, res) => {
-	try {
-		const body = await parse_request_body(req);
-		const { action, threadId = null } = body;
-		
-		if (!action) {
-			send_json_response(res, 400, { error: 'Action is required' });
-			return;
-		}
-		
-		let result;
-		switch (action) {
-			case 'continue':
-				result = await debug_continue(threadId);
-				break;
-
-			case 'stepOver':
-				result = await step_over(threadId);
-				break;
-				
-			case 'stepIn':
-				result = await step_in(threadId);
-				break;
-
-			case 'stepOut':
-				result = await step_out(threadId);
-				break;
-
-			case 'pause':
-				result = await debug_pause(threadId);
-				break;
-
-			default:
-				send_json_response(res, 400, { error: `Unknown action: ${action}` });
-				return;
-		}
-		
-		send_json_response(res, 200, { 
-			action, 
-			result,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
 const read_memory = async (memory_reference, count = 64, offset = 0) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
@@ -760,29 +531,6 @@ const read_memory_via_expression = async (address, count, offset = 0) => {
 	};
 };
 
-const handle_memory = async (req, res) => {
-	try {
-		const body = await parse_request_body(req);
-		const { address, count = 64, offset = 0 } = body;
-		
-		if (!address) {
-			send_json_response(res, 400, { error: 'Memory address is required' });
-			return;
-		}
-		
-		const result = await read_memory(address, count, offset);
-		send_json_response(res, 200, { 
-			address,
-			count,
-			offset,
-			result,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
 const get_debug_profiles = async () => {
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -816,18 +564,6 @@ const get_debug_profiles = async () => {
 	}
 	
 	return profiles;
-};
-
-const handle_profiles = async (req, res) => {
-	try {
-		const profiles = await get_debug_profiles();
-		send_json_response(res, 200, {
-			profiles,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
 };
 
 const start_debug_session = async (profileName = null) => {
@@ -872,69 +608,6 @@ const start_debug_session = async (profileName = null) => {
 	};
 };
 
-const handle_start_debug = async (req, res) => {
-	try {
-		const body = await parse_request_body(req);
-		const { profile = null } = body;
-		
-		const result = await start_debug_session(profile);
-		send_json_response(res, 200, {
-			success: true,
-			...result,
-			timestamp: new Date().toISOString()
-		});
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
-const handle_request = async (req, res) => {
-	if (req.method === 'OPTIONS') {
-		res.writeHead(200, {
-			'Access-Control-Allow-Origin': '*',
-			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-			'Access-Control-Allow-Headers': 'Content-Type'
-		});
-		res.end();
-		return;
-	}
-	
-	const url_parts = req.url.split('?')[0].split('/').filter(Boolean);
-	
-	try {
-		if (req.method === 'GET' && url_parts[0] === 'status')
-			await handle_status(req, res);
-		else if (req.method === 'GET' && url_parts[0] === 'profiles')
-			await handle_profiles(req, res);
-		else if (req.method === 'POST' && url_parts[0] === 'start')
-			await handle_start_debug(req, res);
-		else if (req.method === 'GET' && url_parts[0] === 'variables' && !url_parts[1])
-			await handle_variables(req, res);
-		else if (req.method === 'GET' && url_parts[0] === 'variables' && url_parts[1])
-			await handle_variable_by_name(req, res, url_parts[1]);
-		else if (req.method === 'GET' && url_parts[0] === 'callstack')
-			await handle_call_stack(req, res);
-		else if (req.method === 'GET' && url_parts[0] === 'threads')
-			await handle_threads(req, res);
-		else if (req.method === 'GET' && url_parts[0] === 'registers')
-			await handle_registers(req, res);
-		else if (req.method === 'POST' && url_parts[0] === 'evaluate')
-			await handle_evaluate(req, res);
-		else if ((req.method === 'POST' || req.method === 'GET') && url_parts[0] === 'breakpoints')
-			await handle_breakpoints(req, res);
-		else if (req.method === 'POST' && url_parts[0] === 'control')
-			await handle_control(req, res);
-		else if (req.method === 'POST' && url_parts[0] === 'memory')
-			await handle_memory(req, res);
-		else if (req.method === 'POST' && url_parts[0] === 'disassemble')
-			await handle_disassemble(req, res);
-		else
-			send_json_response(res, 404, { error: 'Not found' });
-	} catch (error) {
-		send_json_response(res, 500, { error: error.message });
-	}
-};
-
 const get_stop_location = async (session, threadId) => {
 	try {
 		const stackTrace = await session.customRequest('stackTrace', { threadId });
@@ -964,6 +637,207 @@ const check_if_stopped_at_breakpoint = (file, line) => {
 	return matchingBreakpoint;
 };
 
+const handle_command = async (client, message) => {
+	const { id, command, data = {} } = message;
+	
+	if (!id) {
+		send_error(client, null, 'Missing message ID');
+		return;
+	}
+	
+	if (!command) {
+		send_error(client, id, 'Missing command');
+		return;
+	}
+	
+	try {
+		let result;
+		
+		switch (command) {
+			case 'status':
+				result = await handle_status_command();
+				break;
+				
+			case 'variables':
+				if (data.name) {
+					result = await get_variable(data.name);
+				} else {
+					const variables = await get_variables();
+					result = { variables };
+				}
+				break;
+				
+			case 'evaluate':
+				if (!data.expression) {
+					throw new Error('Expression is required');
+				}
+				result = await evaluate_expression(data.expression, data.frameId, data.context);
+				break;
+				
+			case 'callstack':
+				result = await get_call_stack();
+				break;
+				
+			case 'threads':
+				const threads = await get_threads();
+				result = { threads };
+				break;
+				
+			case 'registers':
+				const registers = await get_registers();
+				result = { registers };
+				break;
+				
+			case 'disassemble':
+				result = await get_disassembly(data.address, data.count, data.offset);
+				break;
+				
+			case 'breakpoints':
+				if (data.action === 'list' || !data.action) {
+					const breakpoints = get_breakpoints();
+					result = { breakpoints };
+				} else if (data.action === 'set') {
+					if (!data.file || !data.lines) {
+						throw new Error('File and lines are required for set action');
+					}
+					result = await set_breakpoints(data.file, data.lines, data.condition);
+				} else if (data.action === 'clear') {
+					if (!data.file) {
+						throw new Error('File is required for clear action');
+					}
+					result = await clear_breakpoints(data.file, data.lines);
+				} else {
+					throw new Error(`Unknown breakpoint action: ${data.action}`);
+				}
+				break;
+				
+			case 'control':
+				if (!data.action) {
+					throw new Error('Control action is required');
+				}
+				switch (data.action) {
+					case 'continue':
+						result = await debug_continue(data.threadId);
+						break;
+					case 'stepOver':
+						result = await step_over(data.threadId);
+						break;
+					case 'stepIn':
+						result = await step_in(data.threadId);
+						break;
+					case 'stepOut':
+						result = await step_out(data.threadId);
+						break;
+					case 'pause':
+						result = await debug_pause(data.threadId);
+						break;
+					default:
+						throw new Error(`Unknown control action: ${data.action}`);
+				}
+				break;
+				
+			case 'memory':
+				if (!data.address) {
+					throw new Error('Memory address is required');
+				}
+				result = await read_memory(data.address, data.count, data.offset);
+				break;
+				
+			case 'profiles':
+				const profiles = await get_debug_profiles();
+				result = { profiles };
+				break;
+				
+			case 'start':
+				result = await start_debug_session(data.profile);
+				break;
+				
+			default:
+				throw new Error(`Unknown command: ${command}`);
+		}
+		
+		send_response(client, id, true, result);
+		
+	} catch (error) {
+		send_error(client, id, error.message);
+	}
+};
+
+const handle_status_command = async () => {
+	let currentExecutionState = debug_state.execution_state;
+	let currentStopLocation = debug_state.stop_location;
+	let stoppedAtBreakpoint = debug_state.stopped_at_breakpoint;
+	
+	if (current_session) {
+		try {
+			const callStack = await get_call_stack();
+			if (callStack && callStack.length > 0 && callStack[0].frames && callStack[0].frames.length > 0) {
+				const topFrame = callStack[0].frames[0];
+				currentExecutionState = 'stopped';
+				currentStopLocation = {
+					file: topFrame.source,
+					line: topFrame.line,
+					function: topFrame.name,
+					column: topFrame.column
+				};
+				
+				if (topFrame.source && topFrame.line) {
+					const breakpoint = check_if_stopped_at_breakpoint(topFrame.source, topFrame.line);
+					stoppedAtBreakpoint = !!breakpoint;
+					if (breakpoint) {
+						debug_state.execution_state = 'stopped';
+						debug_state.stop_reason = 'breakpoint';
+						debug_state.stop_location = currentStopLocation;
+						debug_state.stopped_at_breakpoint = true;
+					}
+				}
+			}
+		} catch (error) {
+			if (currentExecutionState === 'unknown')
+				currentExecutionState = 'running';
+		}
+	}
+	
+	return {
+		bridge_active: !!wss,
+		debug_session_active: !!current_session,
+		session_name: current_session?.name || null,
+		session_type: current_session?.type || null,
+		is_running: debug_state.is_running,
+		execution_state: currentExecutionState,
+		stop_reason: debug_state.stop_reason || (stoppedAtBreakpoint ? 'breakpoint' : null),
+		stop_location: currentStopLocation,
+		stopped_at_breakpoint: stoppedAtBreakpoint,
+		timestamp: new Date().toISOString(),
+		port: wss?.address()?.port || null
+	};
+};
+
+const handle_websocket_connection = (ws) => {
+	console.log('VDB: Client connected');
+	clients.add(ws);
+	
+	ws.on('message', async (raw_message) => {
+		try {
+			const message = JSON.parse(raw_message.toString());
+			await handle_command(ws, message);
+		} catch (error) {
+			console.warn('VDB: Invalid message from client:', error.message);
+			send_error(ws, null, `Invalid message format: ${error.message}`);
+		}
+	});
+	
+	ws.on('close', () => {
+		console.log('VDB: Client disconnected');
+		clients.delete(ws);
+	});
+	
+	ws.on('error', (error) => {
+		console.warn('VDB: Client error:', error.message);
+		clients.delete(ws);
+	});
+};
+
 const setup_debug_listeners = () => {
 	vscode.debug.onDidStartDebugSession(session => {
 		current_session = session;
@@ -974,19 +848,36 @@ const setup_debug_listeners = () => {
 		debug_state.stopped_at_breakpoint = false;
 		console.log(`VDB: Debug session started - ${session.name} (${session.type})`);
 		
-		// Listen for DAP events from this session
+		broadcast_event('session_started', {
+			name: session.name,
+			type: session.type
+		});
+		
 		session.onDidReceiveDebugSessionCustomEvent(event => {
 			if (event.event === 'stopped') {
 				debug_state.execution_state = 'stopped';
 				debug_state.stop_reason = event.body?.reason || 'unknown';
 				
-				// Get current stack frame to determine location
+				broadcast_event('stopped', {
+					reason: debug_state.stop_reason,
+					threadId: event.body?.threadId
+				});
+				
 				if (event.body?.threadId) {
 					get_stop_location(session, event.body.threadId).then(location => {
 						debug_state.stop_location = location;
 						if (location && location.file && location.line) {
 							const breakpoint = check_if_stopped_at_breakpoint(location.file, location.line);
 							debug_state.stopped_at_breakpoint = !!breakpoint;
+							
+							if (breakpoint) {
+								broadcast_event('breakpoint', {
+									location,
+									condition: breakpoint.condition,
+									hitCondition: breakpoint.hitCondition,
+									logMessage: breakpoint.logMessage
+								});
+							}
 						}
 					}).catch(error => {
 						console.warn('VDB: Failed to get stop location:', error.message);
@@ -999,6 +890,11 @@ const setup_debug_listeners = () => {
 				debug_state.stop_reason = null;
 				debug_state.stop_location = null;
 				debug_state.stopped_at_breakpoint = false;
+				
+				broadcast_event('continued', {
+					threadId: event.body?.threadId
+				});
+				
 				console.log('VDB: Execution continued');
 			}
 		});
@@ -1007,6 +903,12 @@ const setup_debug_listeners = () => {
 	vscode.debug.onDidTerminateDebugSession(session => {
 		if (session === current_session) {
 			console.log(`VDB: Debug session terminated - ${session.name}`);
+			
+			broadcast_event('session_terminated', {
+				name: session.name,
+				type: session.type
+			});
+			
 			current_session = null;
 			debug_state = { 
 				variables: {}, 
@@ -1030,8 +932,8 @@ const setup_debug_listeners = () => {
 };
 
 const start_server = () => {
-	if (server) {
-		console.log('VDB: Server already running');
+	if (wss) {
+		console.log('VDB: WebSocket server already running');
 		return;
 	}
 	
@@ -1039,35 +941,36 @@ const start_server = () => {
 	const port = config.get('port', 3579);
 	const host = config.get('host', 'localhost');
 	
-	server = http.createServer(handle_request);
+	wss = new WebSocketServer({ port, host });
 	
-	server.listen(port, host, () => {
-		const address = server.address();
-		console.log(`VDB: Server started on http://${address.address}:${address.port}`);
-		
-		vscode.window.showInformationMessage(
-			`VDB Bridge started on port ${address.port}`,
-			'Test Connection'
-		).then(selection => {
-			if (selection === 'Test Connection')
-				vscode.env.openExternal(vscode.Uri.parse(`http://${host}:${port}/status`));
-		});
+	wss.on('connection', handle_websocket_connection);
+	
+	wss.on('listening', () => {
+		const address = wss.address();
+		console.log(`VDB: WebSocket server started on ws://${address.address}:${address.port}`);
 	});
 	
-	server.on('error', (error) => {
-		console.error('VDB: Server error:', error);
+	wss.on('error', (error) => {
+		console.error('VDB: WebSocket server error:', error);
 		vscode.window.showErrorMessage(`VDB Bridge failed to start: ${error.message}`);
-		server = null;
+		wss = null;
 	});
 };
 
 const stop_server = () => {
-	if (server) {
-		server.close(() => {
-			console.log('VDB: Server stopped');
+	if (wss) {
+		clients.forEach(client => {
+			if (client.readyState === client.OPEN) {
+				client.close();
+			}
+		});
+		clients.clear();
+		
+		wss.close(() => {
+			console.log('VDB: WebSocket server stopped');
 			vscode.window.showInformationMessage('VDB Bridge stopped');
 		});
-		server = null;
+		wss = null;
 	}
 };
 
@@ -1087,7 +990,7 @@ const activate = (context) => {
 		}),
 		
 		vscode.commands.registerCommand('vdb.status', () => {
-			const status = server ? 'Running' : 'Stopped';
+			const status = wss ? 'Running' : 'Stopped';
 			const session = current_session ? `Active: ${current_session.name}` : 'No active session';
 			vscode.window.showInformationMessage(`VDB Bridge: ${status} | ${session}`);
 		})
@@ -1098,7 +1001,7 @@ const activate = (context) => {
 
 const deactivate = () => {
 	console.log('VDB: Extension deactivating...');
-	if (server)
+	if (wss)
 		stop_server();
 };
 
