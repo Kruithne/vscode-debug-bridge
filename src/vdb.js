@@ -130,6 +130,10 @@ function create_vscode_extension_client(port = 3579) {
 		
 		async remove_breakpoints(file, lines = null) {
 			return await get_endpoint('breakpoints', { file, lines, action: 'clear' });
+		},
+		
+		async disassemble(address = null, count = 10, offset = 0) {
+			return await get_endpoint('disassemble', { address, count, offset });
 		}
 	};
 	
@@ -225,6 +229,46 @@ function format_register_category(category_data) {
 		
 		return lines.join('\n') + '\n';
 	}
+}
+
+function format_disassembly(instructions) {
+	if (!instructions || instructions.length === 0)
+		return 'No disassembly data available';
+	
+	let result = '';
+	
+	for (const instr of instructions) {
+		let line = '';
+		
+		// Format address
+		if (instr.address) {
+			line += instr.address.padEnd(18, ' ');
+		} else {
+			line += ''.padEnd(18, ' ');
+		}
+		
+		// Format bytes/opcode
+		if (instr.instructionBytes) {
+			const bytes = instr.instructionBytes.split(' ').join(' ');
+			line += bytes.padEnd(20, ' ');
+		} else {
+			line += ''.padEnd(20, ' ');
+		}
+		
+		// Format instruction
+		if (instr.instruction) {
+			line += instr.instruction;
+		}
+		
+		// Add symbol information if available
+		if (instr.symbol) {
+			line += `  <${instr.symbol}>`;
+		}
+		
+		result += line + '\n';
+	}
+	
+	return result.trim();
 }
 
 function create_vscode_debug_bridge(port = 3579) {
@@ -664,6 +708,46 @@ async function main() {
 				}
 				break;
 				
+			case 'disasm':
+				let disasm_address = args[1] || null;
+				const disasm_count = args[2] ? parseInt(args[2]) : 10;
+				
+				try {
+					// If no address specified, try to get current execution point
+					if (!disasm_address) {
+						const call_stack = await vdb.get_call_stack();
+						if (call_stack && call_stack.length > 0 && call_stack[0].frames && call_stack[0].frames.length > 0) {
+							// Use current frame's address or a fallback
+							const frame = call_stack[0].frames[0];
+							if (frame.instruction_pointer_reference) {
+								disasm_address = frame.instruction_pointer_reference;
+							} else {
+								console.error('no current execution point available - address required');
+								console.log('Usage: vdb disasm <address> [count]');
+								console.log('Example: vdb disasm 0x1234ABCD 20');
+								return;
+							}
+						} else {
+							console.error('no active debug session or current execution point - address required');
+							console.log('Usage: vdb disasm <address> [count]');
+							console.log('Example: vdb disasm 0x1234ABCD 20');
+							return;
+						}
+					}
+					
+					const result = await vdb.extension_client.disassemble(disasm_address, disasm_count);
+					if (result.instructions && result.instructions.length > 0) {
+						const formatted = format_disassembly(result.instructions);
+						console.log(formatted);
+					} else {
+						console.log('No disassembly data available');
+					}
+				}
+				catch (error) {
+					console.error(error.message);
+				}
+				break;
+				
 			case 'status':
 				const info = await vdb.get_status_info();
 				console.log(`status=${info.available ? 'available' : 'no_session'}`);
@@ -739,6 +823,7 @@ async function main() {
 				console.log('vars                List all variables');
 				console.log('eval <expression>   Evaluate expression');
 				console.log('mem <addr> [sz]     Read memory at address');
+				console.log('disasm [addr] [cnt] Show disassembly at address (or current location)');
 				console.log('stack               Show call stack');
 				console.log('threads             List all threads');
 				console.log('registers           Show CPU registers');

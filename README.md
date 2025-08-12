@@ -156,6 +156,25 @@ address=0x00007ff68a3758d0 size=64
   0x7FF68A375900: 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 |................|
 ```
 
+### vdb disasm
+
+Show disassembly at a specific memory address:
+
+```bash
+# Show 10 instructions (default) at address
+> vdb disasm 0x00007ff8ca34259d 10
+0x00007FF8CA34259D8B C8               mov         ecx,eax
+0x00007FF8CA34259F48 FF 15 8A 38 07 00call        qword ptr [7FF8CA3B5E30h]
+0x00007FF8CA3425A60F 1F 44 00 00      nop         dword ptr [rax+rax]
+0x00007FF8CA3425ABCC                  int         3
+0x00007FF8CA3425AC48 FF 15 1D 40 07 00call        qword ptr [7FF8CA3B65D0h]
+0x00007FF8CA3425B30F 1F 44 00 00      nop         dword ptr [rax+rax]
+0x00007FF8CA3425B8A8 10               test        al,10h
+0x00007FF8CA3425BA74 1B               je          00007FF8CA3425D7
+0x00007FF8CA3425BC48 8D 05 1D BA FF FFlea         rax,[7FF8CA33DFE0h]
+0x00007FF8CA3425C348 89 05 66 77 0A 00mov         qword ptr [7FF8CA3E9D30h],rax
+```
+
 ### vdb stack
 
 Display the current call stack:

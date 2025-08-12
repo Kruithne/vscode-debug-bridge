@@ -316,6 +316,54 @@ const get_registers = async () => {
 	return registers;
 };
 
+const get_disassembly = async (address = null, count = 10, offset = 0) => {
+	if (!current_session)
+		throw new Error('No active debug session');
+	
+	const debug_session = vscode.debug.activeDebugSession;
+	if (!debug_session)
+		throw new Error('No active debug session found');
+	
+	let memory_reference = address;
+	
+	// If no address specified, try to get current instruction pointer
+	if (!memory_reference) {
+		const threads = await debug_session.customRequest('threads');
+		if (!threads?.threads?.length)
+			throw new Error('No threads found');
+		
+		const thread_id = threads.threads[0].id;
+		const stack_trace = await debug_session.customRequest('stackTrace', { threadId: thread_id });
+		
+		if (!stack_trace.stackFrames?.length)
+			throw new Error('No stack frames found');
+		
+		// Try to get instruction pointer from the frame
+		const frame = stack_trace.stackFrames[0];
+		if (frame.instructionPointerReference) {
+			memory_reference = frame.instructionPointerReference;
+		} else {
+			throw new Error('No current execution point available - address required');
+		}
+	}
+	
+	try {
+		const result = await debug_session.customRequest('disassemble', {
+			memoryReference: memory_reference.toString(),
+			instructionCount: count,
+			offset: offset,
+			resolveSymbols: true
+		});
+		
+		return {
+			address: memory_reference,
+			instructions: result.instructions || []
+		};
+	} catch (error) {
+		throw new Error(`Failed to disassemble at address ${memory_reference}: ${error.message}`);
+	}
+};
+
 const process_register_variables = async (debug_session, variables, registers, category_name) => {
 	for (const variable of variables) {
 		if (variable.variablesReference > 0) {
@@ -359,6 +407,22 @@ const handle_registers = async (req, res) => {
 		const registers = await get_registers();
 		send_json_response(res, 200, { 
 			registers,
+			timestamp: new Date().toISOString()
+		});
+	} catch (error) {
+		send_json_response(res, 500, { error: error.message });
+	}
+};
+
+const handle_disassemble = async (req, res) => {
+	try {
+		const body = await parse_request_body(req);
+		const { address = null, count = 10, offset = 0 } = body;
+		
+		const result = await get_disassembly(address, count, offset);
+		send_json_response(res, 200, { 
+			address: result.address,
+			instructions: result.instructions,
 			timestamp: new Date().toISOString()
 		});
 	} catch (error) {
@@ -862,6 +926,8 @@ const handle_request = async (req, res) => {
 			await handle_control(req, res);
 		else if (req.method === 'POST' && url_parts[0] === 'memory')
 			await handle_memory(req, res);
+		else if (req.method === 'POST' && url_parts[0] === 'disassemble')
+			await handle_disassemble(req, res);
 		else
 			send_json_response(res, 404, { error: 'Not found' });
 	} catch (error) {
