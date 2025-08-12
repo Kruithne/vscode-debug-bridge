@@ -152,6 +152,69 @@ function create_vscode_extension_client(port = 3579) {
 			}
 			
 			return await response.json();
+		},
+		
+		async get_profiles() {
+			const response = await fetch(`${client.base_url}/profiles`);
+			if (!response.ok) {
+				const error = await response.json();
+				throw new Error(error.error || 'Failed to get debug profiles');
+			}
+			return await response.json();
+		},
+		
+		async start_debugging(profile_name = null) {
+			const response = await fetch(`${client.base_url}/start`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ profile: profile_name })
+			});
+			
+			if (!response.ok) {
+				const error = await response.json();
+				throw new Error(error.error || 'Failed to start debugging');
+			}
+			
+			return await response.json();
+		},
+		
+		async get_all_breakpoints() {
+			const response = await fetch(`${client.base_url}/breakpoints`);
+			if (!response.ok) {
+				const error = await response.json();
+				throw new Error(error.error || 'Failed to get breakpoints');
+			}
+			return await response.json();
+		},
+		
+		async add_breakpoints(file, lines) {
+			const response = await fetch(`${client.base_url}/breakpoints`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ file, lines, action: 'set' })
+			});
+			
+			if (!response.ok) {
+				const error = await response.json();
+				throw new Error(error.error || 'Failed to add breakpoints');
+			}
+			
+			return await response.json();
+		},
+		
+		async remove_breakpoints(file, lines = null) {
+			const response = await fetch(`${client.base_url}/breakpoints`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ file, lines, action: 'clear' })
+			});
+			
+			if (!response.ok) {
+				const error = await response.json();
+				throw new Error(error.error || 'Failed to remove breakpoints');
+			}
+			
+			return await response.json();
 		}
 	};
 	
@@ -466,6 +529,101 @@ async function main() {
 				}
 				break;
 				
+			case 'profiles':
+				try {
+					const result = await vdb.extension_client.get_profiles();
+					if (result.profiles.length === 0) {
+						console.log('No debug profiles found');
+					} else {
+						result.profiles.forEach((profile, index) => {
+							console.log(`${index + 1}. ${profile.name} (${profile.type}) - ${profile.workspace}`);
+						});
+					}
+				}
+				catch (error) {
+					console.error(error.message);
+				}
+				break;
+				
+			case 'start':
+				const profile_name = args[1] || null;
+				try {
+					const result = await vdb.extension_client.start_debugging(profile_name);
+					console.log(`Started debugging: ${result.profile} (${result.type})`);
+				}
+				catch (error) {
+					console.error(error.message);
+				}
+				break;
+				
+			case 'break':
+				const break_action = args[1];
+				if (!break_action) {
+					console.error('break action required (add, remove, list)');
+					console.log('Usage: vdb break add <file> <line> [line2...]');
+					console.log('       vdb break remove <file> [line] [line2...]');
+					console.log('       vdb break list');
+					return;
+				}
+				
+				if (break_action === 'list') {
+					try {
+						const result = await vdb.extension_client.get_all_breakpoints();
+						if (result.breakpoints.length === 0) {
+							console.log('No breakpoints set');
+						} else {
+							result.breakpoints.forEach(bp => {
+								const status = bp.enabled ? 'enabled' : 'disabled';
+								console.log(`${bp.file}:${bp.line} (${status})`);
+							});
+						}
+					}
+					catch (error) {
+						console.error(error.message);
+					}
+				} else if (break_action === 'add') {
+					const file = args[2];
+					const lines = args.slice(3).map(l => parseInt(l));
+					
+					if (!file || lines.length === 0) {
+						console.error('file and line numbers required');
+						console.log('Usage: vdb break add <file> <line> [line2...]');
+						return;
+					}
+					
+					try {
+						const result = await vdb.extension_client.add_breakpoints(file, lines);
+						console.log(`Added ${lines.length} breakpoint(s) to ${file}`);
+					}
+					catch (error) {
+						console.error(error.message);
+					}
+				} else if (break_action === 'remove') {
+					const file = args[2];
+					const lines = args.slice(3).map(l => parseInt(l));
+					
+					if (!file) {
+						console.error('file required');
+						console.log('Usage: vdb break remove <file> [line] [line2...]');
+						return;
+					}
+					
+					try {
+						const result = await vdb.extension_client.remove_breakpoints(file, lines.length > 0 ? lines : null);
+						if (lines.length > 0) {
+							console.log(`Removed breakpoint(s) at lines ${lines.join(', ')} from ${file}`);
+						} else {
+							console.log(`Removed all breakpoints from ${file}`);
+						}
+					}
+					catch (error) {
+						console.error(error.message);
+					}
+				} else {
+					console.error(`Unknown break action: ${break_action}`);
+				}
+				break;
+				
 			case 'status':
 				const info = await vdb.get_status_info();
 				console.log(`status=${info.available ? 'available' : 'no_session'}`);
@@ -481,18 +639,30 @@ async function main() {
 				break;
 				
 			default:
+				console.log('Debug Session Management:');
+				console.log('profiles            List available debug configurations');
+				console.log('start [profile]     Start debugging (optionally specify profile name)');
+				console.log('status              Check debug and extension status (default)');
+				console.log('');
+				console.log('Breakpoint Management:');
+				console.log('break list          List all breakpoints');
+				console.log('break add <file> <line> [line2...]   Add breakpoints');
+				console.log('break remove <file> [line] [line2...] Remove breakpoints');
+				console.log('');
+				console.log('Debug Information (requires active session):');
 				console.log('var <name>          Get variable value');
 				console.log('vars                List all variables');
 				console.log('eval <expression>   Evaluate expression');
 				console.log('mem <addr> [sz]     Read memory at address');
 				console.log('stack               Show call stack');
 				console.log('threads             List all threads');
+				console.log('');
+				console.log('Debug Control (requires active session):');
 				console.log('continue            Continue execution');
 				console.log('step                Step over');
 				console.log('stepin              Step in');
 				console.log('stepout             Step out');
 				console.log('pause               Pause execution');
-				console.log('status              Check debug and extension status (default)');
 				console.log('');
 				console.log('Options:');
 				console.log('--port=<port>       Connect to extension on custom port (default: 3579)');

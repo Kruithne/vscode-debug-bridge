@@ -248,55 +248,127 @@ const handle_threads = async (req, res) => {
 };
 
 const set_breakpoints = async (file, lines) => {
+	const uri = vscode.Uri.file(file);
+	const lineNumbers = Array.isArray(lines) ? lines : [lines];
+	
+	// Create breakpoints using VSCode's breakpoint API
+	const breakpoints = lineNumbers.map(line => 
+		new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(line - 1, 0)))
+	);
+	
+	// Add breakpoints to VSCode
+	vscode.debug.addBreakpoints(breakpoints);
+	
+	// If there's an active debug session, also set them via DAP
 	const debug_session = vscode.debug.activeDebugSession;
-	if (!debug_session)
-		throw new Error('No active debug session');
+	if (debug_session) {
+		try {
+			const result = await debug_session.customRequest('setBreakpoints', {
+				source: { path: file },
+				breakpoints: lineNumbers.map(line => ({ line }))
+			});
+			return { vscode: breakpoints.length, dap: result };
+		} catch (error) {
+			return { vscode: breakpoints.length, dap: null, error: error.message };
+		}
+	}
 	
-	const breakpoints = Array.isArray(lines) ? 
-	lines.map(line => ({ line })) : 
-	[{ line: lines }];
-	
-	const result = await debug_session.customRequest('setBreakpoints', {
-		source: { path: file },
-		breakpoints
-	});
-	
-	return result;
+	return { vscode: breakpoints.length, dap: null };
 };
 
 const clear_breakpoints = async (file, lines = null) => {
+	const uri = vscode.Uri.file(file);
+	
+	// Get existing breakpoints for this file
+	const existingBreakpoints = vscode.debug.breakpoints.filter(bp => 
+		bp instanceof vscode.SourceBreakpoint && 
+		bp.location.uri.fsPath === uri.fsPath
+	);
+	
+	let breakpointsToRemove = [];
+	
+	if (lines === null) {
+		// Remove all breakpoints in the file
+		breakpointsToRemove = existingBreakpoints;
+	} else {
+		// Remove specific lines
+		const lineNumbers = Array.isArray(lines) ? lines : [lines];
+		breakpointsToRemove = existingBreakpoints.filter(bp => 
+			lineNumbers.includes(bp.location.range.start.line + 1)
+		);
+	}
+	
+	// Remove breakpoints from VSCode
+	if (breakpointsToRemove.length > 0) {
+		vscode.debug.removeBreakpoints(breakpointsToRemove);
+	}
+	
+	// If there's an active debug session, also clear them via DAP
 	const debug_session = vscode.debug.activeDebugSession;
-	if (!debug_session)
-		throw new Error('No active debug session');
+	if (debug_session) {
+		try {
+			const remainingLines = existingBreakpoints
+				.filter(bp => !breakpointsToRemove.includes(bp))
+				.map(bp => ({ line: bp.location.range.start.line + 1 }));
+				
+			const result = await debug_session.customRequest('setBreakpoints', {
+				source: { path: file },
+				breakpoints: remainingLines
+			});
+			return { vscode: breakpointsToRemove.length, dap: result };
+		} catch (error) {
+			return { vscode: breakpointsToRemove.length, dap: null, error: error.message };
+		}
+	}
 	
-	const breakpoints = lines ? 
-	(Array.isArray(lines) ? lines.map(line => ({ line })) : [{ line: lines }]) :
-	[];
+	return { vscode: breakpointsToRemove.length, dap: null };
+};
+
+const get_breakpoints = () => {
+	const sourceBreakpoints = vscode.debug.breakpoints.filter(bp => 
+		bp instanceof vscode.SourceBreakpoint
+	);
 	
-	const result = await debug_session.customRequest('setBreakpoints', {
-		source: { path: file },
-		breakpoints
-	});
-	
-	return result;
+	return sourceBreakpoints.map(bp => ({
+		file: bp.location.uri.fsPath,
+		line: bp.location.range.start.line + 1,
+		enabled: bp.enabled,
+		condition: bp.condition || null,
+		hitCondition: bp.hitCondition || null,
+		logMessage: bp.logMessage || null
+	}));
 };
 
 const handle_breakpoints = async (req, res) => {
 	try {
+		if (req.method === 'GET') {
+			// List all breakpoints
+			const breakpoints = get_breakpoints();
+			send_json_response(res, 200, { 
+				breakpoints,
+				timestamp: new Date().toISOString()
+			});
+			return;
+		}
+		
 		const body = await parse_request_body(req);
 		const { file, lines, action = 'set' } = body;
 		
-		if (!file || !lines) {
-			send_json_response(res, 400, { error: 'File and lines are required' });
+		if (!file) {
+			send_json_response(res, 400, { error: 'File is required' });
 			return;
 		}
 		
 		let result;
-		if (action === 'set')
+		if (action === 'set') {
+			if (!lines) {
+				send_json_response(res, 400, { error: 'Lines are required for set action' });
+				return;
+			}
 			result = await set_breakpoints(file, lines);
-		else if (action === 'clear')
+		} else if (action === 'clear') {
 			result = await clear_breakpoints(file, lines);
-		else {
+		} else {
 			send_json_response(res, 400, { error: 'Action must be "set" or "clear"' });
 			return;
 		}
@@ -496,6 +568,111 @@ const handle_memory = async (req, res) => {
 	}
 };
 
+const get_debug_profiles = async () => {
+	const workspaceFolders = vscode.workspace.workspaceFolders;
+	if (!workspaceFolders || workspaceFolders.length === 0) {
+		throw new Error('No workspace folders found');
+	}
+	
+	const profiles = [];
+	
+	for (const folder of workspaceFolders) {
+		const launchJsonPath = vscode.Uri.joinPath(folder.uri, '.vscode', 'launch.json');
+		
+		try {
+			const content = await vscode.workspace.fs.readFile(launchJsonPath);
+			const launchConfig = JSON.parse(content.toString());
+			
+			if (launchConfig.configurations && Array.isArray(launchConfig.configurations)) {
+				for (const config of launchConfig.configurations) {
+					profiles.push({
+						name: config.name,
+						type: config.type,
+						request: config.request,
+						workspace: folder.name,
+						workspaceUri: folder.uri.toString(),
+						configuration: config
+					});
+				}
+			}
+		} catch (error) {
+			// launch.json doesn't exist or is invalid, skip this workspace
+		}
+	}
+	
+	return profiles;
+};
+
+const handle_profiles = async (req, res) => {
+	try {
+		const profiles = await get_debug_profiles();
+		send_json_response(res, 200, {
+			profiles,
+			timestamp: new Date().toISOString()
+		});
+	} catch (error) {
+		send_json_response(res, 500, { error: error.message });
+	}
+};
+
+const start_debug_session = async (profileName = null) => {
+	const profiles = await get_debug_profiles();
+	
+	if (profiles.length === 0) {
+		throw new Error('No debug configurations found');
+	}
+	
+	let targetProfile;
+	if (profileName) {
+		targetProfile = profiles.find(p => p.name === profileName);
+		if (!targetProfile) {
+			throw new Error(`Debug profile '${profileName}' not found`);
+		}
+	} else {
+		// Use the first profile as default
+		targetProfile = profiles[0];
+	}
+	
+	const workspaceFolder = vscode.workspace.workspaceFolders?.find(
+		f => f.uri.toString() === targetProfile.workspaceUri
+	);
+	
+	if (!workspaceFolder) {
+		throw new Error('Workspace folder not found for debug profile');
+	}
+	
+	const success = await vscode.debug.startDebugging(
+		workspaceFolder, 
+		targetProfile.configuration
+	);
+	
+	if (!success) {
+		throw new Error('Failed to start debug session');
+	}
+	
+	return {
+		profile: targetProfile.name,
+		type: targetProfile.type,
+		workspace: targetProfile.workspace
+	};
+};
+
+const handle_start_debug = async (req, res) => {
+	try {
+		const body = await parse_request_body(req);
+		const { profile = null } = body;
+		
+		const result = await start_debug_session(profile);
+		send_json_response(res, 200, {
+			success: true,
+			...result,
+			timestamp: new Date().toISOString()
+		});
+	} catch (error) {
+		send_json_response(res, 500, { error: error.message });
+	}
+};
+
 const handle_request = async (req, res) => {
 	if (req.method === 'OPTIONS') {
 		res.writeHead(200, {
@@ -512,6 +689,10 @@ const handle_request = async (req, res) => {
 	try {
 		if (req.method === 'GET' && url_parts[0] === 'status')
 			handle_status(req, res);
+		else if (req.method === 'GET' && url_parts[0] === 'profiles')
+			await handle_profiles(req, res);
+		else if (req.method === 'POST' && url_parts[0] === 'start')
+			await handle_start_debug(req, res);
 		else if (req.method === 'GET' && url_parts[0] === 'variables' && !url_parts[1])
 			await handle_variables(req, res);
 		else if (req.method === 'GET' && url_parts[0] === 'variables' && url_parts[1])
@@ -522,7 +703,7 @@ const handle_request = async (req, res) => {
 			await handle_threads(req, res);
 		else if (req.method === 'POST' && url_parts[0] === 'evaluate')
 			await handle_evaluate(req, res);
-		else if (req.method === 'POST' && url_parts[0] === 'breakpoints')
+		else if ((req.method === 'POST' || req.method === 'GET') && url_parts[0] === 'breakpoints')
 			await handle_breakpoints(req, res);
 		else if (req.method === 'POST' && url_parts[0] === 'control')
 			await handle_control(req, res);
@@ -540,10 +721,6 @@ const setup_debug_listeners = () => {
 		current_session = session;
 		debug_state.is_running = true;
 		console.log(`VDB: Debug session started - ${session.name} (${session.type})`);
-		
-		const config = vscode.workspace.getConfiguration('vdb');
-		if (!server && config.get('autoStart', true))
-			start_server();
 	});
 	
 	vscode.debug.onDidTerminateDebugSession(session => {
@@ -613,6 +790,7 @@ const activate = (context) => {
 	console.log('VDB: Extension activating...');
 	
 	setup_debug_listeners();
+	start_server();
 	
 	context.subscriptions.push(
 		vscode.commands.registerCommand('vdb.start', () => {

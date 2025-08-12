@@ -23,7 +23,66 @@ bun link
 
 ## ⌨️ Usage
 
-### vdb status
+### Debug Session Management
+
+#### vdb profiles
+
+List available debug configurations from `.vscode/launch.json`:
+
+```bash
+> vdb profiles
+1. Debug (Windows) (cppvsdbg) - test
+2. Debug (Linux) (cppdbg) - test
+```
+
+#### vdb start
+
+Start a debugging session. Optionally specify a profile name:
+
+```bash
+> vdb start
+Started debugging: Debug (Windows) (cppvsdbg)
+
+> vdb start "Debug (Linux)"
+Started debugging: Debug (Linux) (cppdbg)
+```
+
+### Breakpoint Management
+
+#### vdb break list
+
+List all current breakpoints:
+
+```bash
+> vdb break list
+C:\path\to\file.c:25 (enabled)
+C:\path\to\file.c:40 (enabled)
+```
+
+#### vdb break add
+
+Add breakpoints to specific lines:
+
+```bash
+> vdb break add C:\path\to\file.c 25 30 35
+Added 3 breakpoint(s) to C:\path\to\file.c
+```
+
+#### vdb break remove
+
+Remove breakpoints. Omit line numbers to remove all breakpoints from a file:
+
+```bash
+> vdb break remove C:\path\to\file.c 25
+Removed breakpoint(s) at lines 25 from C:\path\to\file.c
+
+> vdb break remove C:\path\to\file.c
+Removed all breakpoints from C:\path\to\file.c
+```
+
+### Debug Information
+
+#### vdb status
 
 Check debug session and extension availability:
 
@@ -154,18 +213,30 @@ Show available commands:
 
 ```bash
 > vdb help
+Debug Session Management:
+profiles            List available debug configurations
+start [profile]     Start debugging (optionally specify profile name)
+status              Check debug and extension status (default)
+
+Breakpoint Management:
+break list          List all breakpoints
+break add <file> <line> [line2...]   Add breakpoints
+break remove <file> [line] [line2...] Remove breakpoints
+
+Debug Information (requires active session):
 var <name>          Get variable value
 vars                List all variables
 eval <expression>   Evaluate expression
 mem <addr> [sz]     Read memory at address
 stack               Show call stack
 threads             List all threads
+
+Debug Control (requires active session):
 continue            Continue execution
 step                Step over
 stepin              Step in
 stepout             Step out
 pause               Pause execution
-status              Check debug and extension status (default)
 
 Options:
 --port=<port>       Connect to extension on custom port (default: 3579)
