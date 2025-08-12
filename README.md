@@ -363,6 +363,9 @@ stepin              Step in
 stepout             Step out
 pause               Pause execution
 
+Internal
+events              Monitor internal DAP events.
+
 Options:
 --port=<port>       Connect to extension on custom port (default: 3579)
 ```
