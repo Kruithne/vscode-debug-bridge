@@ -166,6 +166,9 @@ stepin              Step in
 stepout             Step out
 pause               Pause execution
 status              Check debug and extension status (default)
+
+Options:
+--port=<port>       Connect to extension on custom port (default: 3579)
 ```
 
 ## ⚖️ Legal

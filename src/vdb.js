@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
 
-function create_vscode_extension_client(base_url = 'http://localhost:3579') {
+function create_vscode_extension_client(port = 3579) {
+	const base_url = `http://localhost:${port}`;
 	const client = {
 		base_url,
 		
@@ -193,9 +194,9 @@ function format_hex_dump(buffer, start_address = '0x0') {
 	return result;
 }
 
-function create_vscode_debug_bridge() {
+function create_vscode_debug_bridge(port = 3579) {
 	const bridge = {
-		extension_client: create_vscode_extension_client(),
+		extension_client: create_vscode_extension_client(port),
 		extension_available: false,
 		
 		async initialize() {
@@ -269,11 +270,38 @@ function create_vscode_debug_bridge() {
 	return bridge;
 }
 
+function parse_args(args) {
+	const parsed = {
+		port: 3579,
+		args: []
+	};
+	
+	for (const arg of args) {
+		if (arg.startsWith('--')) {
+			const [key, value] = arg.substring(2).split('=');
+			
+			switch (key) {
+				case 'port':
+					parsed.port = parseInt(value);
+					break;
+
+				default:
+					console.log(`unrecognized flag ${key}`);
+			}
+		} else {
+			parsed.args.push(arg);
+		}
+	}
+	
+	return parsed;
+}
+
 async function main() {
-	const args = process.argv.slice(2);
+	const raw_args = process.argv.slice(2);
+	const { port, args } = parse_args(raw_args);
 	const command = args[0] || 'status';
 	
-	const vdb = create_vscode_debug_bridge();
+	const vdb = create_vscode_debug_bridge(port);
 	
 	try {
 		const extension_available = await vdb.initialize();
@@ -465,6 +493,9 @@ async function main() {
 				console.log('stepout             Step out');
 				console.log('pause               Pause execution');
 				console.log('status              Check debug and extension status (default)');
+				console.log('');
+				console.log('Options:');
+				console.log('--port=<port>       Connect to extension on custom port (default: 3579)');
 		}
 	}
 	catch (error) {
