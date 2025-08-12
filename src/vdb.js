@@ -255,6 +255,12 @@ function create_vscode_debug_bridge(port = 3579) {
 								name: status.session_name,
 								type: status.session_type,
 								isRunning: status.is_running
+							},
+							execution: {
+								state: status.execution_state,
+								stop_reason: status.stop_reason,
+								stop_location: status.stop_location,
+								stopped_at_breakpoint: status.stopped_at_breakpoint
 							}
 						};
 					}
@@ -666,8 +672,53 @@ async function main() {
 				if (info.available && info.session) {
 					console.log(`session=${info.session.name || info.session.pid || 'unknown'}`);
 					console.log(`type=${info.session.type || 'unknown'}`);
-					if (info.session.isRunning !== undefined) {
+
+					if (info.session.isRunning !== undefined)
 						console.log(`running=${info.session.isRunning ? 'yes' : 'no'}`);
+					
+					if (info.execution) {
+						console.log(`execution=${info.execution.state || 'unknown'}`);
+						
+						if (info.execution.state === 'stopped') {
+							if (info.execution.stop_reason)
+								console.log(`stop_reason=${info.execution.stop_reason}`);
+							
+							if (info.execution.stopped_at_breakpoint && info.execution.stop_location) {
+								const location = info.execution.stop_location;
+								if (location.file && location.line)
+									console.log(`breakpoint=${location.file}:${location.line}`);
+
+								if (location.function)
+									console.log(`function=${location.function}`);
+								
+								try {
+									const breakpoints = await vdb.extension_client.get_all_breakpoints();
+									if (breakpoints.breakpoints) {
+										const matching_bp = breakpoints.breakpoints.find(bp => 
+											bp.file === location.file && bp.line === location.line
+										);
+										if (matching_bp) {
+											if (matching_bp.condition) {
+												console.log(`condition=${matching_bp.condition}`);
+											} else if (matching_bp.hitCondition) {
+												console.log(`hit_condition=${matching_bp.hitCondition}`);
+											} else if (matching_bp.logMessage) {
+												console.log(`log_message=${matching_bp.logMessage}`);
+											}
+										}
+									}
+								} catch (error) {
+									// ignore
+								}
+							} else if (info.execution.stop_location) {
+								const location = info.execution.stop_location;
+								if (location.file && location.line)
+									console.log(`location=${location.file}:${location.line}`);
+
+								if (location.function)
+									console.log(`function=${location.function}`);
+							}
+						}
 					}
 				}
 				break;

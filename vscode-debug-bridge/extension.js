@@ -9,7 +9,11 @@ let debug_state = {
 	threads: [],
 	breakpoints: new Set(),
 	is_running: false,
-	current_frame: null
+	current_frame: null,
+	execution_state: 'unknown', // 'running', 'stopped', 'unknown'
+	stop_reason: null, // 'breakpoint', 'step', 'exception', 'pause', 'entry', etc.
+	stop_location: null, // { file, line, function }
+	stopped_at_breakpoint: false
 };
 
 const parse_request_body = (req) => {
@@ -39,13 +43,51 @@ const send_json_response = (res, status, data) => {
 	res.end(JSON.stringify(data));
 };
 
-const handle_status = (req, res) => {
+const handle_status = async (req, res) => {
+	let currentExecutionState = debug_state.execution_state;
+	let currentStopLocation = debug_state.stop_location;
+	let stoppedAtBreakpoint = debug_state.stopped_at_breakpoint;
+	
+	if (current_session) {
+		try {
+			const callStack = await get_call_stack();
+			if (callStack && callStack.length > 0 && callStack[0].frames && callStack[0].frames.length > 0) {
+				const topFrame = callStack[0].frames[0];
+				currentExecutionState = 'stopped';
+				currentStopLocation = {
+					file: topFrame.source,
+					line: topFrame.line,
+					function: topFrame.name,
+					column: topFrame.column
+				};
+				
+				if (topFrame.source && topFrame.line) {
+					const breakpoint = check_if_stopped_at_breakpoint(topFrame.source, topFrame.line);
+					stoppedAtBreakpoint = !!breakpoint;
+					if (breakpoint) {
+						debug_state.execution_state = 'stopped';
+						debug_state.stop_reason = 'breakpoint';
+						debug_state.stop_location = currentStopLocation;
+						debug_state.stopped_at_breakpoint = true;
+					}
+				}
+			}
+		} catch (error) {
+			if (currentExecutionState === 'unknown')
+				currentExecutionState = 'running';
+		}
+	}
+	
 	send_json_response(res, 200, {
 		bridge_active: !!server,
 		debug_session_active: !!current_session,
 		session_name: current_session?.name || null,
 		session_type: current_session?.type || null,
 		is_running: debug_state.is_running,
+		execution_state: currentExecutionState,
+		stop_reason: debug_state.stop_reason || (stoppedAtBreakpoint ? 'breakpoint' : null),
+		stop_location: currentStopLocation,
+		stopped_at_breakpoint: stoppedAtBreakpoint,
 		timestamp: new Date().toISOString(),
 		port: server?.address()?.port || null
 	});
@@ -797,7 +839,7 @@ const handle_request = async (req, res) => {
 	
 	try {
 		if (req.method === 'GET' && url_parts[0] === 'status')
-			handle_status(req, res);
+			await handle_status(req, res);
 		else if (req.method === 'GET' && url_parts[0] === 'profiles')
 			await handle_profiles(req, res);
 		else if (req.method === 'POST' && url_parts[0] === 'start')
@@ -827,11 +869,73 @@ const handle_request = async (req, res) => {
 	}
 };
 
+const get_stop_location = async (session, threadId) => {
+	try {
+		const stackTrace = await session.customRequest('stackTrace', { threadId });
+		if (stackTrace.stackFrames && stackTrace.stackFrames.length > 0) {
+			const topFrame = stackTrace.stackFrames[0];
+			return {
+				file: topFrame.source?.path || topFrame.source?.name || null,
+				line: topFrame.line || null,
+				function: topFrame.name || null,
+				column: topFrame.column || null
+			};
+		}
+	} catch (error) {
+		console.warn('VDB: Error getting stack trace:', error.message);
+	}
+	return null;
+};
+
+const check_if_stopped_at_breakpoint = (file, line) => {
+	const breakpoints = get_breakpoints();
+	const matchingBreakpoint = breakpoints.find(bp => {
+		// Normalize file paths for comparison
+		const bpFile = bp.file.replace(/\\/g, '/');
+		const stopFile = file.replace(/\\/g, '/');
+		return (bpFile === stopFile || bpFile.endsWith(stopFile) || stopFile.endsWith(bpFile)) && bp.line === line;
+	});
+	return matchingBreakpoint;
+};
+
 const setup_debug_listeners = () => {
 	vscode.debug.onDidStartDebugSession(session => {
 		current_session = session;
 		debug_state.is_running = true;
+		debug_state.execution_state = 'running';
+		debug_state.stop_reason = null;
+		debug_state.stop_location = null;
+		debug_state.stopped_at_breakpoint = false;
 		console.log(`VDB: Debug session started - ${session.name} (${session.type})`);
+		
+		// Listen for DAP events from this session
+		session.onDidReceiveDebugSessionCustomEvent(event => {
+			if (event.event === 'stopped') {
+				debug_state.execution_state = 'stopped';
+				debug_state.stop_reason = event.body?.reason || 'unknown';
+				
+				// Get current stack frame to determine location
+				if (event.body?.threadId) {
+					get_stop_location(session, event.body.threadId).then(location => {
+						debug_state.stop_location = location;
+						if (location && location.file && location.line) {
+							const breakpoint = check_if_stopped_at_breakpoint(location.file, location.line);
+							debug_state.stopped_at_breakpoint = !!breakpoint;
+						}
+					}).catch(error => {
+						console.warn('VDB: Failed to get stop location:', error.message);
+					});
+				}
+				
+				console.log(`VDB: Execution stopped - reason: ${debug_state.stop_reason}`);
+			} else if (event.event === 'continued') {
+				debug_state.execution_state = 'running';
+				debug_state.stop_reason = null;
+				debug_state.stop_location = null;
+				debug_state.stopped_at_breakpoint = false;
+				console.log('VDB: Execution continued');
+			}
+		});
 	});
 	
 	vscode.debug.onDidTerminateDebugSession(session => {
@@ -844,7 +948,11 @@ const setup_debug_listeners = () => {
 				threads: [],
 				breakpoints: new Set(),
 				is_running: false,
-				current_frame: null
+				current_frame: null,
+				execution_state: 'unknown',
+				stop_reason: null,
+				stop_location: null,
+				stopped_at_breakpoint: false
 			};
 		}
 	});

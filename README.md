@@ -103,9 +103,13 @@ Check debug session and extension availability:
 > vdb status
 status=available
 extension=available
-session=Debug (Windows)
+session=Debug C3 (Windows)
 type=cppvsdbg
 running=yes
+execution=stopped
+stop_reason=breakpoint
+breakpoint=d:\vscode-debug-bridge\test\src\debug-test.c3:34
+function=debug-windows-x64.exe!main() Line 34
 ```
 
 ### vdb var
