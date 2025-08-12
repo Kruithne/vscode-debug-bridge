@@ -351,6 +351,7 @@ var <name>          Get variable value
 vars                List all variables
 eval <expression>   Evaluate expression
 mem <addr> [sz]     Read memory at address
+disasm [addr] [cnt] Show disassembly at address (or current location)
 stack               Show call stack
 threads             List all threads
 registers           Show CPU registers
