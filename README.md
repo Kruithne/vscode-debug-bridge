@@ -4,6 +4,44 @@
 
 `vscode-debug-bridge` or `vdb` is a command-line tool that provides direct interaction with live debugging sessions in VSCode.
 
+## 📋 Cheatsheet
+
+```bash
+Debug Session Management:
+profiles            List available debug configurations
+start [profile]     Start debugging (optionally specify profile name)
+status              Check debug and extension status (default)
+wait [events] [timeout] Wait for debug events (comma-separated)
+events              Monitor all DAP events in real-time
+
+Breakpoint Management:
+break list          List all breakpoints
+break add <file> <line> [condition]  Add breakpoint (with optional condition)
+break remove <file> [line] [line2...] Remove breakpoints
+break watch <var/addr> [read|write|access] Add data breakpoint/watchpoint
+
+Debug Information (requires active session):
+var <name>          Get variable value
+vars                List all variables
+eval <expression>   Evaluate expression
+mem <addr> [sz]     Read memory at address
+disasm [addr] [cnt] Show disassembly at address (or current location)
+stack               Show call stack
+threads             List all threads
+registers           Show CPU registers
+
+Debug Control (requires active session):
+continue            Continue execution
+step                Step over
+stepin              Step in
+stepout             Step out
+pause               Pause execution
+
+Options:
+--port=<port>       Connect to extension on custom port (default: 3579)
+--host=<host>       Connect to extension on custom host (default: localhost)
+```
+
 ## Installation
 
 ```bash
@@ -376,47 +414,6 @@ Pause execution:
 paused
 ```
 
-### vdb help
-
-Show available commands:
-
-```bash
-> vdb help
-Debug Session Management:
-profiles            List available debug configurations
-start [profile]     Start debugging (optionally specify profile name)
-status              Check debug and extension status (default)
-wait [events] [timeout] Wait for debug events (default: stopped, 60s timeout)
-
-Breakpoint Management:
-break list          List all breakpoints
-break add <file> <line> [condition]  Add breakpoint (with optional condition)
-break remove <file> [line] [line2...] Remove breakpoints
-break watch <var/addr> [read|write|access] Add data breakpoint/watchpoint
-
-Debug Information (requires active session):
-var <name>          Get variable value
-vars                List all variables
-eval <expression>   Evaluate expression
-mem <addr> [sz]     Read memory at address
-disasm [addr] [cnt] Show disassembly at address (or current location)
-stack               Show call stack
-threads             List all threads
-registers           Show CPU registers
-
-Debug Control (requires active session):
-continue            Continue execution
-step                Step over
-stepin              Step in
-stepout             Step out
-pause               Pause execution
-
-Internal:
-events              Monitor internal DAP events
-
-Options:
---port=<port>       Connect to extension on custom port (default: 3579)
-```
 
 ## ⚖️ Legal
 
