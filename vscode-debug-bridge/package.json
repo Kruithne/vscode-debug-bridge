@@ -1,0 +1,60 @@
+{
+	"name": "vscode-debug-bridge",
+	"displayName": "VSCode Debug Bridge",
+	"description": "HTTP API bridge allowing direct access to debug session information",
+	"version": "1.0.0",
+	"publisher": "vdb",
+	"engines": {
+		"vscode": "^1.75.0"
+	},
+	"categories": [
+		"Debuggers",
+		"Other"
+	],
+	"activationEvents": [
+		"onDebug",
+		"onStartupFinished"
+	],
+	"main": "./extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "vdb.start",
+				"title": "Start VDB Bridge"
+			},
+			{
+				"command": "vdb.stop",
+				"title": "Stop VDB Bridge"
+			},
+			{
+				"command": "vdb.status",
+				"title": "VDB Bridge Status"
+			}
+		],
+		"configuration": {
+			"title": "VSCode Debug Bridge",
+			"properties": {
+				"vdb.port": {
+					"type": "number",
+					"default": 3579,
+					"description": "HTTP API port for debug communication",
+					"minimum": 1024,
+					"maximum": 65535
+				},
+				"vdb.autoStart": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically start bridge when debugging begins"
+				},
+				"vdb.host": {
+					"type": "string",
+					"default": "localhost",
+					"description": "Host to bind the HTTP server to"
+				}
+			}
+		}
+	},
+	"devDependencies": {
+		"@types/vscode": "^1.60.0"
+	}
+}
