@@ -432,6 +432,16 @@ const debug_continue = async (thread_id = null) => {
 		thread_id = threads.threads[0]?.id;
 	}
 	
+	debug_state.execution_state = 'running';
+	debug_state.stop_reason = null;
+	debug_state.stop_location = null;
+	debug_state.stopped_at_breakpoint = false;
+	
+	broadcast_event('dap:continued', {
+		threadId: thread_id
+	});
+	
+	
 	return await debug_session.customRequest('continue', { threadId: thread_id });
 };
 
@@ -444,6 +454,9 @@ const step_over = async (thread_id = null) => {
 		const threads = await debug_session.customRequest('threads');
 		thread_id = threads.threads[0]?.id;
 	}
+	
+	debug_state.execution_state = 'running';
+	broadcast_event('dap:continued', { threadId: thread_id });
 	
 	return await debug_session.customRequest('next', { threadId: thread_id });
 };
@@ -458,6 +471,9 @@ const step_in = async (thread_id = null) => {
 		thread_id = threads.threads[0]?.id;
 	}
 	
+	debug_state.execution_state = 'running';
+	broadcast_event('dap:continued', { threadId: thread_id });
+	
 	return await debug_session.customRequest('stepIn', { threadId: thread_id });
 };
 
@@ -470,6 +486,9 @@ const step_out = async (thread_id = null) => {
 		const threads = await debug_session.customRequest('threads');
 		thread_id = threads.threads[0]?.id;
 	}
+	
+	debug_state.execution_state = 'running';
+	broadcast_event('dap:continued', { threadId: thread_id });
 	
 	return await debug_session.customRequest('stepOut', { threadId: thread_id });
 };
@@ -843,95 +862,139 @@ const handle_websocket_connection = (ws) => {
 
 const setup_debug_listeners = () => {
 	vscode.debug.onDidStartDebugSession(session => {
-		current_session = session;
-		debug_state.is_running = true;
-		debug_state.execution_state = 'running';
-		debug_state.stop_reason = null;
-		debug_state.stop_location = null;
-		debug_state.stopped_at_breakpoint = false;
-		console.log(`VDB: Debug session started - ${session.name} (${session.type})`);
-		
-		broadcast_event('vdb:session_started', {
-			name: session.name,
-			type: session.type
-		});
-		
-		session.onDidReceiveDebugSessionCustomEvent(event => {
-			if (event.event === 'stopped') {
-				debug_state.execution_state = 'stopped';
-				debug_state.stop_reason = event.body?.reason || 'unknown';
-				
-				broadcast_event('dap:stopped', {
-					reason: debug_state.stop_reason,
-					threadId: event.body?.threadId
-				});
-				
-				if (event.body?.threadId) {
-					get_stop_location(session, event.body.threadId).then(location => {
-						debug_state.stop_location = location;
-						if (location && location.file && location.line) {
-							const breakpoint = check_if_stopped_at_breakpoint(location.file, location.line);
-							debug_state.stopped_at_breakpoint = !!breakpoint;
-							
-							if (breakpoint) {
-								broadcast_event('dap:breakpoint', {
-									location,
-									condition: breakpoint.condition,
-									hitCondition: breakpoint.hitCondition,
-									logMessage: breakpoint.logMessage
-								});
-							}
-						}
-					}).catch(error => {
-						console.warn('VDB: Failed to get stop location:', error.message);
-					});
-				}
-				
-				console.log(`VDB: Execution stopped - reason: ${debug_state.stop_reason}`);
-			} else if (event.event === 'continued') {
-				debug_state.execution_state = 'running';
-				debug_state.stop_reason = null;
-				debug_state.stop_location = null;
-				debug_state.stopped_at_breakpoint = false;
-				
-				broadcast_event('dap:continued', {
-					threadId: event.body?.threadId
-				});
-				
-				console.log('VDB: Execution continued');
-			}
-		});
-	});
-	
-	vscode.debug.onDidTerminateDebugSession(session => {
-		if (session === current_session) {
-			console.log(`VDB: Debug session terminated - ${session.name}`);
+		try {
+			current_session = session;
+			debug_state.is_running = true;
+			debug_state.execution_state = 'running';
+			debug_state.stop_reason = null;
+			debug_state.stop_location = null;
+			debug_state.stopped_at_breakpoint = false;
+			console.log(`VDB: Debug session started - ${session.name} (${session.type})`);
 			
-			broadcast_event('vdb:session_terminated', {
+			broadcast_event('dap:session_started', {
 				name: session.name,
 				type: session.type
 			});
-			
-			current_session = null;
-			debug_state = { 
-				variables: {}, 
-				call_stack: [], 
-				threads: [],
-				breakpoints: new Set(),
-				is_running: false,
-				current_frame: null,
-				execution_state: 'unknown',
-				stop_reason: null,
-				stop_location: null,
-				stopped_at_breakpoint: false
-			};
+		} catch (error) {
+			console.error('VDB: Error in onDidStartDebugSession:', error);
 		}
 	});
 	
-	vscode.debug.onDidChangeActiveStackItem(async (stack_item) => {
-		if (stack_item)
-			debug_state.current_frame = stack_item;
+	vscode.debug.onDidTerminateDebugSession(session => {
+		try {
+			if (session === current_session) {
+				console.log(`VDB: Debug session terminated - ${session.name}`);
+				
+				broadcast_event('dap:session_terminated', {
+					name: session.name,
+					type: session.type
+				});
+				
+				current_session = null;
+				debug_state = { 
+					variables: {}, 
+					call_stack: [], 
+					threads: [],
+					breakpoints: new Set(),
+					is_running: false,
+					current_frame: null,
+					execution_state: 'unknown',
+					stop_reason: null,
+					stop_location: null,
+					stopped_at_breakpoint: false
+				};
+			}
+		} catch (error) {
+			console.error('VDB: Error in onDidTerminateDebugSession:', error);
+		}
 	});
+	
+	vscode.debug.onDidChangeActiveDebugSession(session => {
+		try {
+			if (session && session === current_session) {
+				debug_state.execution_state = 'stopped';
+				debug_state.stop_reason = 'step';
+				
+				broadcast_event('dap:stopped', {
+					reason: 'step',
+					threadId: null
+				});
+			}
+		} catch (error) {
+			console.error('VDB: Error in onDidChangeActiveDebugSession:', error);
+		}
+	});
+
+	vscode.debug.onDidChangeActiveStackItem(async (stack_item) => {
+		try {
+			if (stack_item) {
+				debug_state.current_frame = stack_item;
+				
+				let location = { file: null, line: null, function: null, column: null };
+				
+				if (stack_item.session && stack_item.threadId && stack_item.frameId) {
+					try {
+						const stackTrace = await stack_item.session.customRequest('stackTrace', { 
+							threadId: stack_item.threadId,
+							startFrame: 0,
+							levels: 1
+						});
+						
+						if (stackTrace.stackFrames && stackTrace.stackFrames.length > 0) {
+							const frame = stackTrace.stackFrames[0];
+							location = {
+								file: frame.source?.path || null,
+								line: frame.line || null,
+								function: frame.name || null,
+								column: frame.column || null
+							};
+						}
+					} catch (error) {
+						console.warn('VDB: Failed to get stack trace:', error.message);
+					}
+				}
+				
+				if (!location.file && !location.line && debug_state.execution_state === 'stopped') {
+					debug_state.execution_state = 'running';
+					debug_state.stop_reason = null;
+					debug_state.stop_location = null;
+					debug_state.stopped_at_breakpoint = false;
+					
+					broadcast_event('dap:continued', {
+						threadId: stack_item.threadId || null
+					});
+				} else if (location.file || location.line) {
+					debug_state.execution_state = 'stopped';
+					debug_state.stop_location = location;
+					
+					let reason = 'step';
+					if (location.file && location.line) {
+						const breakpoint = check_if_stopped_at_breakpoint(location.file, location.line);
+						debug_state.stopped_at_breakpoint = !!breakpoint;
+						
+						if (breakpoint) {
+							reason = 'breakpoint';
+							broadcast_event('dap:breakpoint', {
+								location,
+								condition: breakpoint.condition,
+								hitCondition: breakpoint.hitCondition,
+								logMessage: breakpoint.logMessage
+							});
+						}
+					}
+					
+					broadcast_event('dap:stopped', {
+						reason,
+						threadId: stack_item.threadId || null,
+						location
+					});
+				}
+			}
+		} catch (error) {
+			console.error('VDB: Error in onDidChangeActiveStackItem:', error);
+		}
+	});
+	
 };
 
 const start_server = () => {

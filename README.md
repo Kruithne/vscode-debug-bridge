@@ -47,6 +47,32 @@ Started debugging: Debug (Windows) (cppvsdbg)
 Started debugging: Debug (Linux) (cppdbg)
 ```
 
+#### vdb wait
+
+Wait for specific debug events to occur:
+
+```bash
+# Wait for execution to stop (default)
+> vdb wait
+waiting for events: stopped (timeout: 60s)
+event occurred: stopped reason=breakpoint file=main.c:25 function=main()
+
+# Wait for a breakpoint hit
+> vdb wait breakpoint
+waiting for events: breakpoint (timeout: 60s)
+event occurred: breakpoint file=main.c:30 function=calculateSum()
+
+# Wait for execution to continue
+> vdb wait continued
+waiting for events: continued (timeout: 60s)
+event occurred: continued
+
+# Wait for multiple events with custom timeout
+> vdb wait stopped,continued 30
+waiting for events: stopped, continued (timeout: 30s)
+event occurred: continued
+```
+
 ### Breakpoint Management
 
 #### vdb break list
@@ -340,6 +366,7 @@ Debug Session Management:
 profiles            List available debug configurations
 start [profile]     Start debugging (optionally specify profile name)
 status              Check debug and extension status (default)
+wait [events] [timeout] Wait for debug events (default: stopped, 60s timeout)
 
 Breakpoint Management:
 break list          List all breakpoints
@@ -363,8 +390,8 @@ stepin              Step in
 stepout             Step out
 pause               Pause execution
 
-Internal
-events              Monitor internal DAP events.
+Internal:
+events              Monitor internal DAP events
 
 Options:
 --port=<port>       Connect to extension on custom port (default: 3579)

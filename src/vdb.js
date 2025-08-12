@@ -98,7 +98,7 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 			try {
 				callback(event_name, data);
 			} catch (error) {
-				console.warn(`VDB: Namespace listener error for '${namespace}' on event '${event}':`, error.message);
+				console.warn(`VDB: Namespace listener error for '${event_ns}' on event '${event}':`, error.message);
 			}
 		}
 	};
@@ -334,22 +334,23 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 				events = [events];
 			
 			return new Promise((resolve, reject) => {
-					const timeout_id = setTimeout(() => {
-						events.forEach(event => client.off(event, event_handler));
-						reject(new Error(`Timeout waiting for events: ${events.join(', ')}`));
-					}, timeout);
-					
-					const event_handler = (data) => {
+				const timeout_id = setTimeout(() => {
+					events.forEach(event => client.off(event, event_handlers.get(event)));
+					reject(new Error(`Timeout waiting for events: ${events.join(', ')}`));
+				}, timeout);
+				
+				const event_handlers = new Map();
+				
+				events.forEach(event => {
+					const handler = (data) => {
 						clearTimeout(timeout_id);
-						events.forEach(event => client.off(event, event_handler));
-						resolve({ event: arguments.callee.event_name, data });
+						events.forEach(e => client.off(e, event_handlers.get(e)));
+						resolve({ event, data });
 					};
-					
-					events.forEach(event => {
-						event_handler.event_name = event;
-						client.on(event, event_handler);
-					});
+					event_handlers.set(event, handler);
+					client.on(event, handler);
 				});
+			});
 		}
 	};
 	
@@ -487,14 +488,19 @@ function format_event(event_name, data) {
 			if (value !== null && value !== undefined) {
 				if (key === 'location' && typeof value === 'object') {
 					if (value.file && value.line) {
-						parts.push(`file=${value.file}`);
-						parts.push(`line=${value.line}`);
+						const filename = value.file.split(/[/\\]/).pop();
+						parts.push(`file=${filename}:${value.line}`);
 					}
-
 					if (value.function)
 						parts.push(`function=${value.function}`);
-				} else if (key === 'threadId') {
+				} else if (key === 'threadId' && value !== null) {
 					parts.push(`thread=${value}`);
+				} else if (key === 'reason') {
+					parts.push(`reason=${value}`);
+				} else if (key === 'name') {
+					parts.push(`name=${value}`);
+				} else if (key === 'type') {
+					parts.push(`type=${value}`);
 				} else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
 					parts.push(`${key}=${value}`);
 				}
@@ -646,17 +652,17 @@ async function main() {
 		
 		switch (command) {
 			case 'wait':
-				const wait_events = args[1] ? args[1].split(',') : ['dap:stopped'];
+				const user_events = args[1] ? args[1].split(',') : ['stopped'];
+				const wait_events = user_events.map(event => event.trim().startsWith('dap:') ? event.trim() : `dap:${event.trim()}`);
 				const timeout = args[2] ? parseInt(args[2]) * 1000 : 60000;
 				
-				console.log(`waiting for events: ${wait_events.join(', ')} (timeout: ${timeout/1000}s)`);
+				console.log(`waiting for events: ${user_events.join(', ')} (timeout: ${timeout/1000}s)`);
 				
 				try {
 					const result = await vdb.extension_client.wait_for_event(wait_events, timeout);
-					console.log(`event occurred: ${result.event}`);
-					if (result.data) {
-						console.log(JSON.stringify(result.data, null, 2));
-					}
+					const [event_ns, event_name] = result.event.split(':');
+					const formatted = format_event(event_name, result.data);
+					console.log(`event occurred: ${formatted}`);
 				} catch (error) {
 					console.error(error.message);
 				}
@@ -670,11 +676,11 @@ async function main() {
 					console.log(formatted);
 				};
 				
-				vdb.extension_client.on_namespace('dap:', event_handler);
+					vdb.extension_client.on_namespace('dap', event_handler);
 				
 				process.on('SIGINT', () => {
 					console.log('aborted');
-					vdb.extension_client.off_namespace('dap:');
+					vdb.extension_client.off_namespace('dap');
 					process.exit(0);
 				});
 				
