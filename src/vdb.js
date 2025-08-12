@@ -188,14 +188,14 @@ function create_vscode_debug_bridge(port = 3579) {
 			if (bridge.extension_available) {
 				try {
 					const status = await bridge.extension_client.get_status();
-					if (status.debugSessionActive) {
+					if (status.debug_session_active) {
 						return {
 							...base_info,
 							available: true,
 							session: {
-								name: status.sessionName,
-								type: status.sessionType,
-								isRunning: status.isRunning
+								name: status.session_name,
+								type: status.session_type,
+								isRunning: status.is_running
 							}
 						};
 					}
