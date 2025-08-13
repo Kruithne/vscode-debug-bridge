@@ -236,12 +236,12 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 			return await send_command('status');
 		},
 		
-		async get_variables() {
-			return await send_command('variables');
+		async get_variables(thread_id = null) {
+			return await send_command('variables', { threadId: thread_id });
 		},
 		
-		async get_variable(name) {
-			return await send_command('variables', { name });
+		async get_variable(name, thread_id = null) {
+			return await send_command('variables', { name, threadId: thread_id });
 		},
 		
 		async get_call_stack() {
@@ -249,8 +249,8 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 			return result;
 		},
 		
-		async get_threads() {
-			return await send_command('threads');
+		async get_threads(detailed = false) {
+			return await send_command('threads', { detailed });
 		},
 		
 		async get_registers() {
@@ -281,24 +281,24 @@ function create_vscode_extension_client(port = 3579, host = 'localhost') {
 			return await send_command('breakpoints', { file, lines, action: 'clear' });
 		},
 		
-		async continue(thread_id = null) {
-			return await send_command('control', { action: 'continue', threadId: thread_id });
+		async continue(thread_id = null, single_thread = false) {
+			return await send_command('control', { action: 'continue', threadId: thread_id, singleThread: single_thread });
 		},
 		
-		async step_over(thread_id = null) {
-			return await send_command('control', { action: 'stepOver', threadId: thread_id });
+		async step_over(thread_id = null, single_thread = false) {
+			return await send_command('control', { action: 'stepOver', threadId: thread_id, singleThread: single_thread });
 		},
 		
-		async step_in(thread_id = null) {
-			return await send_command('control', { action: 'stepIn', threadId: thread_id });
+		async step_in(thread_id = null, single_thread = false) {
+			return await send_command('control', { action: 'stepIn', threadId: thread_id, singleThread: single_thread });
 		},
 		
-		async step_out(thread_id = null) {
-			return await send_command('control', { action: 'stepOut', threadId: thread_id });
+		async step_out(thread_id = null, single_thread = false) {
+			return await send_command('control', { action: 'stepOut', threadId: thread_id, singleThread: single_thread });
 		},
 		
-		async pause(thread_id = null) {
-			return await send_command('control', { action: 'pause', threadId: thread_id });
+		async pause(thread_id = null, single_thread = false) {
+			return await send_command('control', { action: 'pause', threadId: thread_id, singleThread: single_thread });
 		},
 		
 		async control(action, thread_id = null) {
@@ -563,6 +563,8 @@ function create_vscode_debug_bridge(port = 3579, host = 'localhost') {
 	const bridge = {
 		extension_client: create_vscode_extension_client(port, host),
 		extension_available: false,
+		selected_thread_id: null,
+		available_threads: [],
 		
 		async initialize() {
 			try {
@@ -610,19 +612,21 @@ function create_vscode_debug_bridge(port = 3579, host = 'localhost') {
 			return base_info;
 		},
 		
-		async get_variable_value(name) {
+		async get_variable_value(name, thread_id = null) {
 			if (!bridge.extension_available)
 				throw new Error('Variable access requires VSCode Debug Bridge extension');
 			
-			const variable = await bridge.extension_client.get_variable(name);
+			const target_thread = thread_id || bridge.selected_thread_id;
+			const variable = await bridge.extension_client.get_variable(name, target_thread);
 			return variable.value;
 		},
 		
-		async get_all_variables() {
+		async get_all_variables(thread_id = null) {
 			if (!bridge.extension_available)
 				throw new Error('Variable access requires VSCode Debug Bridge extension');
 			
-			const result = await bridge.extension_client.get_variables();
+			const target_thread = thread_id || bridge.selected_thread_id;
+			const result = await bridge.extension_client.get_variables(target_thread);
 			return result.variables;
 		},
 		
@@ -648,6 +652,35 @@ function create_vscode_debug_bridge(port = 3579, host = 'localhost') {
 			
 			const result = await bridge.extension_client.get_registers();
 			return result.registers;
+		},
+		
+		async get_threads(detailed = false) {
+			if (!bridge.extension_available)
+				throw new Error('Thread access requires VSCode Debug Bridge extension');
+			
+			const result = await bridge.extension_client.get_threads(detailed);
+			bridge.available_threads = result.threads;
+			
+			if (!bridge.selected_thread_id && result.threads.length > 0)
+				bridge.selected_thread_id = result.threads[0].id;
+			
+			return result;
+		},
+		
+		select_thread(thread_id) {
+			const thread = bridge.available_threads.find(t => t.id === thread_id);
+			if (!thread)
+				throw new Error(`Thread ${thread_id} not found. Available threads: ${bridge.available_threads.map(t => t.id).join(', ')}`);
+
+			bridge.selected_thread_id = thread_id;
+			return thread;
+		},
+		
+		get_current_thread() {
+			if (!bridge.selected_thread_id)
+				return null;
+
+			return bridge.available_threads.find(t => t.id === bridge.selected_thread_id) || null;
 		}
 	};
 	
@@ -658,7 +691,8 @@ function parse_args(args) {
 	const parsed = {
 		port: 3579,
 		host: 'localhost',
-		args: []
+		args: [],
+		flags: {}
 	};
 	
 	for (const arg of args) {
@@ -672,8 +706,18 @@ function parse_args(args) {
 				case 'host':
 					parsed.host = value;
 					break;
+				case 'thread':
+					parsed.flags.thread = parseInt(value);
+					break;
+				case 'single-thread':
+					parsed.flags.singleThread = true;
+					break;
 				default:
-					console.log(`unrecognized flag ${key}`);
+					if (key === 'detailed') {
+						parsed.flags.detailed = true;
+					} else {
+						console.log(`unrecognized flag ${key}`);
+					}
 			}
 		} else {
 			parsed.args.push(arg);
@@ -685,7 +729,7 @@ function parse_args(args) {
 
 async function main() {
 	const raw_args = process.argv.slice(2);
-	const { port, host, args } = parse_args(raw_args);
+	const { port, host, args, flags } = parse_args(raw_args);
 	const command = args[0] || 'status';
 	
 	const vdb = create_vscode_debug_bridge(port, host);
@@ -739,13 +783,14 @@ async function main() {
 				const var_name = args[1];
 				if (!var_name) {
 					console.error('variable name required');
-					console.log('Usage: vdb var <name>');
+					console.log('Usage: vdb var <name> [--thread=<id>]');
 					return;
 				}
 				
 				try {
-					const value = await vdb.get_variable_value(var_name);
-					console.log(`${var_name}=${value}`);
+					const value = await vdb.get_variable_value(var_name, flags.thread);
+					const thread_info = flags.thread ? ` (thread ${flags.thread})` : '';
+					console.log(`${var_name}=${value}${thread_info}`);
 				}
 				catch (error) {
 					console.error(error.message);
@@ -754,7 +799,11 @@ async function main() {
 				
 			case 'vars':
 				try {
-					const variables = await vdb.get_all_variables();
+					const variables = await vdb.get_all_variables(flags.thread);
+					const thread_info = flags.thread ? ` for thread ${flags.thread}` : '';
+					if (thread_info) {
+						console.log(`Variables${thread_info}:`);
+					}
 					for (const [name, info] of Object.entries(variables)) {
 						console.log(`${name}=${info.value} (${info.type})`);
 					}
@@ -835,11 +884,72 @@ async function main() {
 				}
 				break;
 				
+			case 'thread':
+				const thread_action = args[1];
+				if (!thread_action) {
+					console.error('thread action required (select, current)');
+					console.log('Usage: vdb thread select <id>');
+					console.log('       vdb thread current');
+					return;
+				}
+				
+				if (thread_action === 'select') {
+					const thread_id = parseInt(args[2]);
+					if (!thread_id && thread_id !== 0) {
+						console.error('thread ID required');
+						console.log('Usage: vdb thread select <id>');
+						return;
+					}
+					
+					try {
+						// Update thread list first
+						await vdb.get_threads();
+						const selected_thread = vdb.select_thread(thread_id);
+						console.log(`Selected thread ${selected_thread.id}: ${selected_thread.name}`);
+					}
+					catch (error) {
+						console.error(error.message);
+					}
+				} else if (thread_action === 'current') {
+					try {
+						// Update thread list first
+						await vdb.get_threads();
+						const current_thread = vdb.get_current_thread();
+						if (current_thread) {
+							console.log(`Current thread: ${current_thread.id} ${current_thread.name}`);
+						} else {
+							console.log('No thread selected');
+						}
+					}
+					catch (error) {
+						console.error(error.message);
+					}
+				} else {
+					console.error(`Unknown thread action: ${thread_action}`);
+				}
+				break;
+				
 			case 'threads':
+				const detailed_flag = flags.detailed || false;
 				try {
-					const result = await vdb.extension_client.get_threads();
+					const result = await vdb.get_threads(detailed_flag);
 					result.threads.forEach(thread => {
-						console.log(`${thread.id} ${thread.name}`);
+						const selected = thread.id === vdb.selected_thread_id ? '*' : ' ';
+						
+						if (detailed_flag) {
+							let output = `${selected}${thread.id} ${thread.name} [${thread.state}]`;
+							if (thread.location) {
+								const filename = thread.location.file ? thread.location.file.split(/[/\\]/).pop() : '';
+								if (filename && thread.location.line)
+									output += ` ${filename}:${thread.location.line}`;
+
+								if (thread.location.function)
+									output += ` ${thread.location.function}`;
+							}
+							console.log(output);
+						} else {
+							console.log(`${selected}${thread.id} ${thread.name}`);
+						}
 					});
 				}
 				catch (error) {
@@ -864,8 +974,9 @@ async function main() {
 				
 			case 'continue':
 				try {
-					await vdb.extension_client.continue();
-					console.log('continued');
+					await vdb.extension_client.continue(vdb.selected_thread_id, flags.singleThread);
+					const single_thread_info = flags.singleThread ? ' (single thread)' : '';
+					console.log(`continued${single_thread_info}`);
 				}
 				catch (error) {
 					console.error(error.message);
@@ -874,8 +985,9 @@ async function main() {
 				
 			case 'step':
 				try {
-					await vdb.extension_client.step_over();
-					console.log('step over');
+					await vdb.extension_client.step_over(vdb.selected_thread_id, flags.singleThread);
+					const single_thread_info = flags.singleThread ? ' (single thread)' : '';
+					console.log(`step over${single_thread_info}`);
 				}
 				catch (error) {
 					console.error(error.message);
@@ -884,8 +996,9 @@ async function main() {
 				
 			case 'stepin':
 				try {
-					await vdb.extension_client.step_in();
-					console.log('step in');
+					await vdb.extension_client.step_in(vdb.selected_thread_id, flags.singleThread);
+					const single_thread_info = flags.singleThread ? ' (single thread)' : '';
+					console.log(`step in${single_thread_info}`);
 				}
 				catch (error) {
 					console.error(error.message);
@@ -894,8 +1007,9 @@ async function main() {
 				
 			case 'stepout':
 				try {
-					await vdb.extension_client.step_out();
-					console.log('step out');
+					await vdb.extension_client.step_out(vdb.selected_thread_id, flags.singleThread);
+					const single_thread_info = flags.singleThread ? ' (single thread)' : '';
+					console.log(`step out${single_thread_info}`);
 				}
 				catch (error) {
 					console.error(error.message);
@@ -904,8 +1018,9 @@ async function main() {
 				
 			case 'pause':
 				try {
-					await vdb.extension_client.pause();
-					console.log('paused');
+					await vdb.extension_client.pause(vdb.selected_thread_id, flags.singleThread);
+					const single_thread_info = flags.singleThread ? ' (single thread)' : '';
+					console.log(`paused${single_thread_info}`);
 				}
 				catch (error) {
 					console.error(error.message);
@@ -1196,22 +1311,26 @@ async function main() {
 				console.log('break remove <file> [line] [line2...] Remove breakpoints');
 				console.log('break watch <var/addr> [read|write|access] Add data breakpoint/watchpoint');
 				console.log('');
+				console.log('Thread Management:');
+				console.log('threads [--detailed] List all threads (with optional state and location info)');
+				console.log('thread select <id>  Switch active thread context');
+				console.log('thread current      Show currently selected thread');
+				console.log('');
 				console.log('Debug Information (requires active session):');
-				console.log('var <name>          Get variable value');
-				console.log('vars                List all variables');
+				console.log('var <name> [--thread=<id>]  Get variable value (optionally from specific thread)');
+				console.log('vars [--thread=<id>]        List all variables (optionally from specific thread)');
 				console.log('eval <expression>   Evaluate expression');
 				console.log('mem <addr> [sz]     Read memory at address');
 				console.log('disasm [addr] [cnt] Show disassembly at address (or current location)');
 				console.log('stack               Show call stack');
-				console.log('threads             List all threads');
 				console.log('registers           Show CPU registers');
 				console.log('');
 				console.log('Debug Control (requires active session):');
-				console.log('continue            Continue execution');
-				console.log('step                Step over');
-				console.log('stepin              Step in');
-				console.log('stepout             Step out');
-				console.log('pause               Pause execution');
+				console.log('continue [--single-thread]  Continue execution (optionally only current thread)');
+				console.log('step [--single-thread]      Step over (optionally only current thread)');
+				console.log('stepin [--single-thread]    Step in (optionally only current thread)');
+				console.log('stepout [--single-thread]   Step out (optionally only current thread)');
+				console.log('pause [--single-thread]     Pause execution (optionally only current thread)');
 				console.log('');
 				console.log('Options:');
 				console.log('--port=<port>       Connect to extension on custom port (default: 3579)');

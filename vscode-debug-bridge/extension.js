@@ -58,7 +58,7 @@ const send_error = (client, id, error_message) => {
 	send_response(client, id, false, null, error_message);
 };
 
-const get_variables = async () => {
+const get_variables = async (thread_id = null) => {
 	if (!current_session)
 		throw new Error('No active debug session');
 	
@@ -66,11 +66,13 @@ const get_variables = async () => {
 	if (!debug_session)
 		throw new Error('No active debug session found');
 	
-	const threads = await debug_session.customRequest('threads');
-	if (!threads?.threads?.length)
-		throw new Error('No threads found');
-	
-	const thread_id = threads.threads[0].id;
+	// Use provided thread_id or default to first thread
+	if (!thread_id) {
+		const threads = await debug_session.customRequest('threads');
+		if (!threads?.threads?.length)
+			throw new Error('No threads found');
+		thread_id = threads.threads[0].id;
+	}
 	const stack_trace = await debug_session.customRequest('stackTrace', { threadId: thread_id });
 	
 	if (!stack_trace.stackFrames?.length)
@@ -107,8 +109,8 @@ const get_variables = async () => {
 	return variables;
 };
 
-const get_variable = async (name) => {
-	const variables = await get_variables();
+const get_variable = async (name, thread_id = null) => {
+	const variables = await get_variables(thread_id);
 	if (!variables[name])
 		throw new Error(`Variable '${name}' not found in current scope`);
 	
@@ -178,13 +180,45 @@ const get_call_stack = async () => {
 	return call_stacks;
 };
 
-const get_threads = async () => {
+const get_threads = async (detailed = false) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
 		throw new Error('No active debug session');
 	
-	const threads = await debug_session.customRequest('threads');
-	return threads.threads || [];
+	const threads_response = await debug_session.customRequest('threads');
+	const threads = threads_response.threads || [];
+	
+	if (!detailed)
+		return threads;
+	
+	const detailed_threads = [];
+	for (const thread of threads) {
+		let thread_info = { ...thread, state: 'running', location: null };
+		
+		try {
+			const stack_trace = await debug_session.customRequest('stackTrace', {
+				threadId: thread.id,
+				startFrame: 0,
+				levels: 1
+			});
+			
+			if (stack_trace.stackFrames && stack_trace.stackFrames.length > 0) {
+				const frame = stack_trace.stackFrames[0];
+				thread_info.state = 'stopped';
+				thread_info.location = {
+					file: frame.source?.path || frame.source?.name,
+					line: frame.line,
+					function: frame.name
+				};
+			}
+		} catch (error) {
+			// default state
+		}
+		
+		detailed_threads.push(thread_info);
+	}
+	
+	return detailed_threads;
 };
 
 const get_registers = async () => {
@@ -262,7 +296,6 @@ const get_disassembly = async (address = null, count = 10, offset = 0) => {
 	
 	let memory_reference = address;
 	
-	// If no address specified, try to get current instruction pointer
 	if (!memory_reference) {
 		const threads = await debug_session.customRequest('threads');
 		if (!threads?.threads?.length)
@@ -274,7 +307,6 @@ const get_disassembly = async (address = null, count = 10, offset = 0) => {
 		if (!stack_trace.stackFrames?.length)
 			throw new Error('No stack frames found');
 		
-		// Try to get instruction pointer from the frame
 		const frame = stack_trace.stackFrames[0];
 		if (frame.instructionPointerReference) {
 			memory_reference = frame.instructionPointerReference;
@@ -301,7 +333,8 @@ const get_disassembly = async (address = null, count = 10, offset = 0) => {
 };
 
 const parse_condition = (condition_str) => {
-	if (!condition_str) return {};
+	if (!condition_str)
+		return {};
 	
 	// Log message: contains {...}
 	if (condition_str.includes('{') && condition_str.includes('}')) {
@@ -322,7 +355,6 @@ const set_breakpoints = async (file, lines, condition = null) => {
 	const lineNumbers = Array.isArray(lines) ? lines : [lines];
 	const conditionProps = parse_condition(condition);
 	
-	// Create breakpoints using VSCode's breakpoint API
 	const breakpoints = lineNumbers.map(line => 
 		new vscode.SourceBreakpoint(
 			new vscode.Location(uri, new vscode.Position(line - 1, 0)),
@@ -333,10 +365,8 @@ const set_breakpoints = async (file, lines, condition = null) => {
 		)
 	);
 	
-	// Add breakpoints to VSCode
 	vscode.debug.addBreakpoints(breakpoints);
 	
-	// If there's an active debug session, also set them via DAP
 	const debug_session = vscode.debug.activeDebugSession;
 	if (debug_session) {
 		try {
@@ -364,7 +394,6 @@ const set_breakpoints = async (file, lines, condition = null) => {
 const clear_breakpoints = async (file, lines = null) => {
 	const uri = vscode.Uri.file(file);
 	
-	// Get existing breakpoints for this file
 	const existingBreakpoints = vscode.debug.breakpoints.filter(bp => 
 		bp instanceof vscode.SourceBreakpoint && 
 		bp.location.uri.fsPath === uri.fsPath
@@ -373,22 +402,17 @@ const clear_breakpoints = async (file, lines = null) => {
 	let breakpointsToRemove = [];
 	
 	if (lines === null) {
-		// Remove all breakpoints in the file
 		breakpointsToRemove = existingBreakpoints;
 	} else {
-		// Remove specific lines
 		const lineNumbers = Array.isArray(lines) ? lines : [lines];
 		breakpointsToRemove = existingBreakpoints.filter(bp => 
 			lineNumbers.includes(bp.location.range.start.line + 1)
 		);
 	}
 	
-	// Remove breakpoints from VSCode
-	if (breakpointsToRemove.length > 0) {
+	if (breakpointsToRemove.length > 0)
 		vscode.debug.removeBreakpoints(breakpointsToRemove);
-	}
 	
-	// If there's an active debug session, also clear them via DAP
 	const debug_session = vscode.debug.activeDebugSession;
 	if (debug_session) {
 		try {
@@ -522,7 +546,7 @@ const get_data_breakpoints = () => {
 	}));
 };
 
-const debug_continue = async (thread_id = null) => {
+const debug_continue = async (thread_id = null, single_thread = false) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
 		throw new Error('No active debug session');
@@ -538,14 +562,18 @@ const debug_continue = async (thread_id = null) => {
 	debug_state.stopped_at_breakpoint = false;
 	
 	broadcast_event('dap:continued', {
-		threadId: thread_id
+		threadId: thread_id,
+		singleThread: single_thread
 	});
 	
+	const request_params = { threadId: thread_id };
+	if (single_thread)
+		request_params.singleThread = true;
 	
-	return await debug_session.customRequest('continue', { threadId: thread_id });
+	return await debug_session.customRequest('continue', request_params);
 };
 
-const step_over = async (thread_id = null) => {
+const step_over = async (thread_id = null, single_thread = false) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
 		throw new Error('No active debug session');
@@ -556,12 +584,16 @@ const step_over = async (thread_id = null) => {
 	}
 	
 	debug_state.execution_state = 'running';
-	broadcast_event('dap:continued', { threadId: thread_id });
+	broadcast_event('dap:continued', { threadId: thread_id, singleThread: single_thread });
 	
-	return await debug_session.customRequest('next', { threadId: thread_id });
+	const request_params = { threadId: thread_id };
+	if (single_thread)
+		request_params.singleThread = true;
+	
+	return await debug_session.customRequest('next', request_params);
 };
 
-const step_in = async (thread_id = null) => {
+const step_in = async (thread_id = null, single_thread = false) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
 		throw new Error('No active debug session');
@@ -572,12 +604,16 @@ const step_in = async (thread_id = null) => {
 	}
 	
 	debug_state.execution_state = 'running';
-	broadcast_event('dap:continued', { threadId: thread_id });
+	broadcast_event('dap:continued', { threadId: thread_id, singleThread: single_thread });
 	
-	return await debug_session.customRequest('stepIn', { threadId: thread_id });
+	const request_params = { threadId: thread_id };
+	if (single_thread)
+		request_params.singleThread = true;
+	
+	return await debug_session.customRequest('stepIn', request_params);
 };
 
-const step_out = async (thread_id = null) => {
+const step_out = async (thread_id = null, single_thread = false) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
 		throw new Error('No active debug session');
@@ -588,12 +624,16 @@ const step_out = async (thread_id = null) => {
 	}
 	
 	debug_state.execution_state = 'running';
-	broadcast_event('dap:continued', { threadId: thread_id });
+	broadcast_event('dap:continued', { threadId: thread_id, singleThread: single_thread });
 	
-	return await debug_session.customRequest('stepOut', { threadId: thread_id });
+	const request_params = { threadId: thread_id };
+	if (single_thread)
+		request_params.singleThread = true;
+	
+	return await debug_session.customRequest('stepOut', request_params);
 };
 
-const debug_pause = async (thread_id = null) => {
+const debug_pause = async (thread_id = null, single_thread = false) => {
 	const debug_session = vscode.debug.activeDebugSession;
 	if (!debug_session)
 		throw new Error('No active debug session');
@@ -603,7 +643,11 @@ const debug_pause = async (thread_id = null) => {
 		thread_id = threads.threads[0]?.id;
 	}
 	
-	return await debug_session.customRequest('pause', { threadId: thread_id });
+	const request_params = { threadId: thread_id };
+	if (single_thread)
+		request_params.singleThread = true;
+	
+	return await debug_session.customRequest('pause', request_params);
 };
 
 const read_memory = async (memory_reference, count = 64, offset = 0) => {
@@ -782,9 +826,9 @@ const handle_command = async (client, message) => {
 				
 			case 'variables':
 				if (data.name) {
-					result = await get_variable(data.name);
+					result = await get_variable(data.name, data.threadId);
 				} else {
-					const variables = await get_variables();
+					const variables = await get_variables(data.threadId);
 					result = { variables };
 				}
 				break;
@@ -801,7 +845,8 @@ const handle_command = async (client, message) => {
 				break;
 				
 			case 'threads':
-				const threads = await get_threads();
+				const detailed = data.detailed || false;
+				const threads = await get_threads(detailed);
 				result = { threads };
 				break;
 				
@@ -854,19 +899,19 @@ const handle_command = async (client, message) => {
 				}
 				switch (data.action) {
 					case 'continue':
-						result = await debug_continue(data.threadId);
+						result = await debug_continue(data.threadId, data.singleThread);
 						break;
 					case 'stepOver':
-						result = await step_over(data.threadId);
+						result = await step_over(data.threadId, data.singleThread);
 						break;
 					case 'stepIn':
-						result = await step_in(data.threadId);
+						result = await step_in(data.threadId, data.singleThread);
 						break;
 					case 'stepOut':
-						result = await step_out(data.threadId);
+						result = await step_out(data.threadId, data.singleThread);
 						break;
 					case 'pause':
-						result = await debug_pause(data.threadId);
+						result = await debug_pause(data.threadId, data.singleThread);
 						break;
 					default:
 						throw new Error(`Unknown control action: ${data.action}`);

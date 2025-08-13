@@ -20,22 +20,27 @@ break add <file> <line> [condition]  Add breakpoint (with optional condition)
 break remove <file> [line] [line2...] Remove breakpoints
 break watch <var/addr> [read|write|access] Add data breakpoint/watchpoint
 
+Thread Management (experimental):
+threads             List all threads (shows selected thread with *)
+threads --detailed  List threads with state and location information  
+thread select <id>  Switch active thread context
+thread current      Show currently selected thread
+
 Debug Information (requires active session):
-var <name>          Get variable value
-vars                List all variables
+var <name> [--thread=<id>]  Get variable value (optionally from specific thread)
+vars [--thread=<id>]        List all variables (optionally from specific thread)
 eval <expression>   Evaluate expression
 mem <addr> [sz]     Read memory at address
 disasm [addr] [cnt] Show disassembly at address (or current location)
 stack               Show call stack
-threads             List all threads
 registers           Show CPU registers
 
 Debug Control (requires active session):
-continue            Continue execution
-step                Step over
-stepin              Step in
-stepout             Step out
-pause               Pause execution
+continue [--single-thread]  Continue execution (optionally only current thread)
+step [--single-thread]      Step over (optionally only current thread)
+stepin [--single-thread]    Step in (optionally only current thread)
+stepout [--single-thread]   Step out (optionally only current thread)
+pause [--single-thread]     Pause execution (optionally only current thread)
 
 Options:
 --port=<port>       Connect to extension on custom port (default: 3579)
@@ -275,11 +280,42 @@ Display the current call stack:
 List all active threads:
 
 ```bash
-> vdb threads
-14068 Main Thread
-27872 ntdll.dll thread
-24320 ntdll.dll thread
-9708 ntdll.dll thread
+> vdb threads --detailed
+*1 Main Thread [stopped] debug-test.c3:35 main
+ 2 ntdll.dll thread [running]
+ 3 ntdll.dll thread [running] 
+ 4 worker_thread [stopped] debug-test.c3:20 worker_thread
+```
+
+### Thread Management
+
+Switch between threads and access thread-specific information:
+
+```bash
+# Select a specific thread as active context
+> vdb thread select 2
+Selected thread 2: worker_thread
+
+# Show current active thread
+> vdb thread current
+Current thread: 2 worker_thread
+
+# Get variables from specific thread
+> vdb var counter --thread=2
+counter=5 (thread 2)
+
+# List variables from specific thread
+> vdb vars --thread=1
+Variables for thread 1:
+counter=10 (int)
+greeting=Hello DAP! (char[])
+
+# Single-thread execution control
+> vdb continue --single-thread
+continued (single thread)
+
+> vdb step --single-thread  
+step over (single thread)
 ```
 
 ### vdb registers
